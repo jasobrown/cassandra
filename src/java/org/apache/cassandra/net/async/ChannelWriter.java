@@ -19,8 +19,11 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
-import java.util.Optional;
 import java.util.Queue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -40,6 +43,7 @@ import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
+import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.utils.CoalescingStrategies;
 import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
@@ -137,7 +141,6 @@ abstract class ChannelWriter
     static final AttributeKey<Boolean> PURGE_MESSAGES_CHANNEL_ATTR = AttributeKey.newInstance("purgeMessages");
 
     protected final Channel channel;
-    private volatile boolean closed;
 
     /** Number of currently pending messages on this channel. */
     final AtomicLong pendingMessageCount = new AtomicLong(0);
@@ -154,7 +157,9 @@ abstract class ChannelWriter
      */
     private final MessageResult messageResult = new MessageResult();
 
-    protected ChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer)
+    private volatile boolean closed;
+
+    ChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer)
     {
         this.channel = channel;
         this.messageResultConsumer = messageResultConsumer;
@@ -165,11 +170,14 @@ abstract class ChannelWriter
      * Creates a new {@link ChannelWriter} using the (assumed properly connected) provided channel, and using coalescing
      * based on the provided strategy.
      */
-    static ChannelWriter create(Channel channel, Consumer<MessageResult> messageResultConsumer, Optional<CoalescingStrategy> coalescingStrategy)
+    static ChannelWriter create(Channel channel, OutboundConnectionParams params)
     {
-        return coalescingStrategy.isPresent()
-               ? new CoalescingChannelWriter(channel, messageResultConsumer, coalescingStrategy.get())
-               : new SimpleChannelWriter(channel, messageResultConsumer);
+        if (params.connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE)
+            return new LargeMessageChannelWriter(channel, params.messageResultConsumer, params.protocolVersion);
+
+        return params.coalescingStrategy.isPresent()
+               ? new CoalescingChannelWriter(channel, params.messageResultConsumer, params.coalescingStrategy.get())
+               : new SimpleChannelWriter(channel, params.messageResultConsumer);
     }
 
     /**
@@ -188,9 +196,13 @@ abstract class ChannelWriter
      */
     boolean write(QueuedMessage message, boolean checkWritability)
     {
-        if ( (checkWritability && (channel.isWritable()) || !channel.isOpen()) || !checkWritability)
+        if ((checkWritability && (channel.isWritable()) || !channel.isOpen()) || !checkWritability)
         {
-            write0(message).addListener(f -> handleMessageFuture(f, message, true));
+            ChannelFuture channelFuture = write0(message);
+            if (channelFuture == null)
+                return false;
+
+            channelFuture.addListener(f -> handleMessageFuture(f, message, true));
             return true;
         }
         return false;
@@ -249,6 +261,12 @@ abstract class ChannelWriter
             channel.flush();
 
         return count;
+    }
+
+    // TODO:JEB rename me
+    boolean requiresMessageSerializer()
+    {
+        return true;
     }
 
     void close()
@@ -335,6 +353,99 @@ abstract class ChannelWriter
         void onTriggeredFlush(ChannelHandlerContext ctx)
         {
             // Don't actually flush on "normal" flush calls to the channel.
+        }
+    }
+
+    // TODO:JEB document me!!!!
+    @VisibleForTesting
+    static class LargeMessageChannelWriter extends ChannelWriter
+    {
+        private final BlockingQueue<Runnable> queue;
+        private final ExecutorService svc;
+        private final int messagingVersion;
+
+        protected LargeMessageChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, int messagingVersion)
+        {
+            super(channel, messageResultConsumer);
+            this.messagingVersion = messagingVersion;
+
+            // explicitly set the queue's capacity to 1, to ensure we don't build up a backlog.
+            // note: this still isn't quite what we want here, but getting there ....
+            queue = new LinkedBlockingQueue<>(1);
+            this.svc = new ThreadPoolExecutor(1, 1, 10L, TimeUnit.SECONDS, queue, new NamedThreadFactory("LargeMessageWriter"));
+        }
+
+        boolean requiresMessageSerializer()
+        {
+            return false;
+        }
+
+        @Override
+        protected ChannelFuture write0(QueuedMessage message)
+        {
+            pendingMessageCount.incrementAndGet();
+            ChannelPromise aggregatePromise = channel.newPromise();
+            if (queue.offer(new LargeMessageWorkUnit(message, aggregatePromise)))
+                return aggregatePromise;
+
+            // couldn't queue message
+            pendingMessageCount.decrementAndGet();
+            return null;
+        }
+
+        @Override
+        void onMessageProcessed(ChannelHandlerContext ctx)
+        {
+            throw new AssertionError("shouldn't get to this method via the intended use of this class");
+        }
+
+        @Override
+        void onTriggeredFlush(ChannelHandlerContext ctx)
+        {
+            throw new AssertionError("shouldn't get to this method via the intended use of this class");
+        }
+
+        public void close()
+        {
+            // TODO:JEB not sure which should come first ....
+            super.close();
+            svc.shutdownNow();
+        }
+
+        private class LargeMessageWorkUnit implements Runnable
+        {
+            private final QueuedMessage currentMessage;
+            private final ChannelPromise aggregatePromise;
+
+            private LargeMessageWorkUnit(QueuedMessage currentMessage, ChannelPromise aggregatePromise)
+            {
+                this.currentMessage = currentMessage;
+                this.aggregatePromise = aggregatePromise;
+            }
+
+            @Override
+            public void run()
+            {
+                // TODO:JEB make the buffer size a constatnt or param, not a magic number
+                try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, 64 * 1024, this::handleError))
+                {
+                    currentMessage.message.serialize(output, messagingVersion);
+                    pendingMessageCount.decrementAndGet();
+                    channel.flush();
+                    aggregatePromise.setSuccess();
+                }
+                catch (Exception e)
+                {
+                    aggregatePromise.setFailure(e);
+                }
+            }
+
+            void handleError(Throwable t)
+            {
+                aggregatePromise.setFailure(t);
+
+                // TODO:JEB need to cancel the thread/task/conncetion/etc
+            }
         }
     }
 

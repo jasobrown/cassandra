@@ -24,6 +24,7 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import com.google.common.util.concurrent.Uninterruptibles;
 import org.slf4j.Logger;
@@ -39,7 +40,6 @@ import org.apache.cassandra.io.util.BufferedDataOutputStreamPlus;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.streaming.StreamManager.StreamRateLimiter;
-import org.apache.cassandra.streaming.StreamSession;
 
 /**
  * A {@link DataOutputStreamPlus} that writes to a {@link ByteBuf}. The novelty here is that all writes
@@ -50,10 +50,10 @@ import org.apache.cassandra.streaming.StreamSession;
  */
 public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
 {
-    private final StreamSession session;
+    private final Logger logger = LoggerFactory.getLogger(ByteBufDataOutputStreamPlus.class);
     private final Channel channel;
     private final int bufferSize;
-    private final Logger logger = LoggerFactory.getLogger(ByteBufDataOutputStreamPlus.class);
+    private final Consumer<Throwable> errorHandler;
 
     /**
      * Tracks how many bytes we've written to the netty channel. This more or less follows the channel's
@@ -68,13 +68,13 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
      */
     private ByteBuf currentBuf;
 
-    private ByteBufDataOutputStreamPlus(StreamSession session, Channel channel, ByteBuf buffer, int bufferSize)
+    private ByteBufDataOutputStreamPlus(Channel channel, ByteBuf buffer, int bufferSize, Consumer<Throwable> errorHandler)
     {
         super(buffer.nioBuffer(0, bufferSize));
-        this.session = session;
         this.channel = channel;
         this.currentBuf = buffer;
         this.bufferSize = bufferSize;
+        this.errorHandler = errorHandler;
         channelRateLimiter = new Semaphore(channel.config().getWriteBufferHighWaterMark(), true);
     }
 
@@ -104,10 +104,10 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
         };
     }
 
-    public static ByteBufDataOutputStreamPlus create(StreamSession session, Channel channel, int bufferSize)
+    public static ByteBufDataOutputStreamPlus create(Channel channel, int bufferSize, Consumer<Throwable> errorHandler)
     {
         ByteBuf buf = channel.alloc().directBuffer(bufferSize, bufferSize);
-        return new ByteBufDataOutputStreamPlus(session, channel, buf, bufferSize);
+        return new ByteBufDataOutputStreamPlus(channel, buf, bufferSize, errorHandler);
     }
 
     /**
@@ -119,6 +119,7 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
 
         int byteCount = buf.readableBytes();
 
+        // TODO:JEB make this block time a method param
         if (!Uninterruptibles.tryAcquireUninterruptibly(channelRateLimiter, byteCount, 5, TimeUnit.MINUTES))
             throw new IOException(String.format("outbound channel was not writable. Failed to acquire sufficient permits %d", byteCount));
 
@@ -215,7 +216,7 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
         channelRateLimiter.release(bytesWritten);
         logger.trace("bytesWritten {} {} because {}", bytesWritten, (future.isSuccess() == true) ? "Succeeded" : "Failed", future.cause());
         if (!future.isSuccess() && channel.isOpen())
-            session.onError(future.cause());
+            errorHandler.accept(future.cause());
     }
 
     public ByteBufAllocator getAllocator()
