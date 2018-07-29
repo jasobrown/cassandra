@@ -31,8 +31,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.codec.ByteToMessageDecoder;
+import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.FastThreadLocalThread;
 import org.apache.cassandra.db.monitoring.ApproximateTime;
 import org.apache.cassandra.exceptions.UnknownTableException;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -40,7 +44,7 @@ import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.ParameterType;
 
-public abstract class BaseMessageInHandler extends ByteToMessageDecoder
+public abstract class BaseMessageInHandler extends ChannelInboundHandlerAdapter
 {
     public static final Logger logger = LoggerFactory.getLogger(BaseMessageInHandler.class);
 
@@ -74,6 +78,7 @@ public abstract class BaseMessageInHandler extends ByteToMessageDecoder
      */
     final BiConsumer<MessageIn, Integer> messageConsumer;
 
+    final BufferHandler bufferHandler;
     final InetAddressAndPort peer;
     final int messagingVersion;
 
@@ -82,9 +87,20 @@ public abstract class BaseMessageInHandler extends ByteToMessageDecoder
         this.peer = peer;
         this.messagingVersion = messagingVersion;
         this.messageConsumer = messageConsumer;
+
+        if (largeMessages)
+            bufferHandler = new BackgroundBufferHandler(ctx);
+        else
+            bufferHandler = new ForegroundBufferHandler();
     }
 
-    public abstract void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out);
+    public void channelRead(ChannelHandlerContext ctx, Object msg)
+    {
+        bufferHandler.channelRead(ctx, );
+    }
+
+    // TODO"JEB rename me
+    abstract void decode(ChannelHandlerContext ctx, ByteBuf in);
 
     MessageHeader readFirstChunk(ByteBuf in) throws IOException
     {
@@ -99,6 +115,7 @@ public abstract class BaseMessageInHandler extends ByteToMessageDecoder
         return messageHeader;
     }
 
+    // TODO:JEB reevaluate the error handling once I switch from ByteToMessageDecoder to ChannelInboundHandlerAdapter
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
     {
@@ -128,7 +145,7 @@ public abstract class BaseMessageInHandler extends ByteToMessageDecoder
     /**
      * A simple struct to hold the message header data as it is being built up.
      */
-    protected static class MessageHeader
+    static class MessageHeader
     {
         int messageId;
         long constructionTime;
@@ -144,5 +161,141 @@ public abstract class BaseMessageInHandler extends ByteToMessageDecoder
          * key/value entries in the header.
          */
         int parameterLength;
+    }
+
+    // TODO:JEB document this -- basically, a poor coder's mixin
+    abstract class BufferHandler
+    {
+        abstract void channelRead(ChannelHandlerContext ctx, ByteBuf in);
+
+        abstract void close()
+    }
+
+    class ForegroundBufferHandler extends BufferHandler
+    {
+        /**
+         * If a buffer is not completely consumed, stash it here for the next invocation of
+         * {@link #channelRead(ChannelHandlerContext, ByteBuf)}.
+         */
+        private ByteBuf retainedInlineBuffer;
+
+        void channelRead(ChannelHandlerContext ctx, ByteBuf in)
+        {
+            final ByteBuf toProcess;
+            if (retainedInlineBuffer != null)
+                toProcess = ByteToMessageDecoder.MERGE_CUMULATOR.cumulate(ctx.alloc(), retainedInlineBuffer, in);
+            else
+                toProcess = in;
+
+            try
+            {
+                process(ctx, toProcess);
+            }
+            finally
+            {
+                if (toProcess.isReadable())
+                {
+                    retainedInlineBuffer = toProcess;
+                }
+                else
+                {
+                    toProcess.release();
+                    retainedInlineBuffer = null;
+                }
+            }
+        }
+
+        void close()
+        {
+            retainedInlineBuffer.release();
+            retainedInlineBuffer = null;
+        }
+    }
+
+    class BackgroundBufferHandler extends BufferHandler
+    {
+        /**
+         * The default low-water mark to set on {@link #queuedBuffers} when in {@link Mode#OFFLOAD}.
+         * See {@link RebufferingByteBufDataInputPlus} for more information.
+         */
+        private static final int OFFLINE_QUEUE_LOW_WATER_MARK = 1 << 14;
+
+        /**
+         * The default high-water mark to set on {@link #queuedBuffers} when in {@link Mode#OFFLOAD}.
+         * See {@link RebufferingByteBufDataInputPlus} for more information.
+         */
+        private static final int OFFLINE_QUEUE_HIGH_WATER_MARK = 1 << 15;
+
+        /**
+         * A queue in which to stash incoming {@link ByteBuf}s.
+         */
+        private final RebufferingByteBufDataInputPlus queuedBuffers;
+
+        private volatile boolean closed;
+
+        BackgroundBufferHandler(ChannelHandlerContext ctx)
+        {
+            queuedBuffers = new RebufferingByteBufDataInputPlus(OFFLINE_QUEUE_LOW_WATER_MARK,
+                                                                OFFLINE_QUEUE_HIGH_WATER_MARK,
+                                                                ctx.channel().config());
+
+            Thread blockingIOThread = new FastThreadLocalThread(() -> process(ctx));
+            blockingIOThread.setDaemon(true);
+            blockingIOThread.start();
+        }
+
+        public void channelRead(ChannelHandlerContext ctx, ByteBuf in)
+        {
+            // TODO:JEB perhaps put this in a more general location
+            if (closed)
+            {
+                in.release();
+                return;
+            }
+
+            queuedBuffers.append(in);
+        }
+
+        private void process(ChannelHandlerContext ctx)
+        {
+            try
+            {
+                while (!closed)
+                {
+                    // TODO:JEB this is the blocking version of what's in the MIH.decode() functions.
+                    // Is there a way to make either this function or what's in MIH.decode() functions generic?
+                    // I think that needs to happen, or else it's gonna get ugly ...
+
+                    // also, in the current state, this is completely fucking broken
+                    MessagingService.validateMagic(queuedBuffers.readInt());
+                    int messageId = queuedBuffers.readInt();
+                    int messageTimestamp = queuedBuffers.readInt(); // make sure to read the sent timestamp, even if DatabaseDescriptor.hasCrossNodeTimeout() is not enabled
+                    long constructionTime = MessageIn.deriveConstructionTime(peer, messageTimestamp, ApproximateTime.currentTimeMillis());
+
+                    MessageIn messageIn = MessageIn.read(queuedBuffers, messagingVersion, messageId, constructionTime);
+                    if (messageIn != null)
+                        messageConsumer.accept(messageIn, messageId);
+                }
+            }
+            catch (EOFException eof)
+            {
+                // ignore
+            }
+            catch(Throwable t)
+            {
+                exceptionCaught(ctx, t);
+            }
+            finally
+            {
+                if (queuedBuffers != null)
+                    queuedBuffers.close();
+            }
+        }
+
+        void close()
+        {
+            closed = true;
+            queuedBuffers.markClose();
+        }
     }
 }
