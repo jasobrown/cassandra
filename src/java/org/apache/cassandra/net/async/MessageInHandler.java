@@ -25,6 +25,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 
 import com.google.common.primitives.Ints;
 import org.slf4j.Logger;
@@ -76,7 +77,7 @@ public class MessageInHandler extends BaseMessageInHandler
      * maintains a trivial state machine to remember progress across invocations.
      */
     @SuppressWarnings("resource")
-    public void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out)
+    public void process(ChannelHandlerContext ctx, ByteBuf in, BiFunction<ByteBuf, MessageHeader, PayloadStruct> payloadParser)
     {
         ByteBufDataInputPlus inputPlus = new ByteBufDataInputPlus(in);
         try
@@ -124,16 +125,13 @@ public class MessageInHandler extends BaseMessageInHandler
                         state = State.READ_PAYLOAD;
                         // fall-through
                     case READ_PAYLOAD:
-                        if (in.readableBytes() < messageHeader.payloadSize)
+                        PayloadStruct payloadStruct = payloadParser.apply(in, messageHeader);
+                        if (!payloadStruct.fullyParsed)
                             return;
 
                         // TODO consider deserializing the message not on the event loop
-                        MessageIn<Object> messageIn = MessageIn.read(inputPlus, messagingVersion,
-                                                                     messageHeader.messageId, messageHeader.constructionTime, messageHeader.from,
-                                                                     messageHeader.payloadSize, messageHeader.verb, messageHeader.parameters);
-
-                        if (messageIn != null)
-                            messageConsumer.accept(messageIn, messageHeader.messageId);
+                        if (payloadStruct.messageIn != null)
+                            messageConsumer.accept(payloadStruct.messageIn, messageHeader.messageId);
 
                         state = State.READ_FIRST_CHUNK;
                         messageHeader = null;

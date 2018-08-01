@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -100,7 +101,7 @@ public abstract class BaseMessageInHandler extends ChannelInboundHandlerAdapter
     }
 
     // TODO"JEB rename me
-    abstract void decode(ChannelHandlerContext ctx, ByteBuf in);
+    abstract void process(ChannelHandlerContext ctx, ByteBuf in, BiFunction<ByteBuf, MessageHeader, PayloadStruct> payloadParser);
 
     MessageHeader readFirstChunk(ByteBuf in) throws IOException
     {
@@ -166,9 +167,27 @@ public abstract class BaseMessageInHandler extends ChannelInboundHandlerAdapter
     // TODO:JEB document this -- basically, a poor coder's mixin
     abstract class BufferHandler
     {
-        abstract void channelRead(ChannelHandlerContext ctx, ByteBuf in);
+        final PayloadStruct payloadStruct = new PayloadStruct();
 
-        abstract void close()
+        abstract void channelRead(ChannelHandlerContext ctx, ByteBuf in) throws IOException;
+
+//        abstract MessageIn<Object> parseMessage(int payloadSize);
+
+        abstract void close();
+    }
+
+    static class PayloadStruct
+    {
+        // did we have enough bytes?
+        boolean fullyParsed;
+
+        MessageIn<Object> messageIn;
+
+        void reset()
+        {
+            fullyParsed = false;
+            messageIn = null;
+        }
     }
 
     class ForegroundBufferHandler extends BufferHandler
@@ -179,7 +198,7 @@ public abstract class BaseMessageInHandler extends ChannelInboundHandlerAdapter
          */
         private ByteBuf retainedInlineBuffer;
 
-        void channelRead(ChannelHandlerContext ctx, ByteBuf in)
+        void channelRead(ChannelHandlerContext ctx, ByteBuf in) throws IOException
         {
             final ByteBuf toProcess;
             if (retainedInlineBuffer != null)
@@ -189,7 +208,7 @@ public abstract class BaseMessageInHandler extends ChannelInboundHandlerAdapter
 
             try
             {
-                process(ctx, toProcess);
+                process(ctx, toProcess, this::parseMessage);
             }
             finally
             {
@@ -203,6 +222,26 @@ public abstract class BaseMessageInHandler extends ChannelInboundHandlerAdapter
                     retainedInlineBuffer = null;
                 }
             }
+        }
+
+        PayloadStruct parseMessage(ByteBuf in, MessageHeader messageHeader) throws IOException
+        {
+            PayloadStruct payload = this.payloadStruct;
+            payload.reset();
+
+            if (in.readableBytes() < messageHeader.payloadSize)
+            {
+                payload.fullyParsed = false;
+                return payload;
+            }
+
+            payload.fullyParsed = true;
+            ByteBufDataInputPlus inputPlus = new ByteBufDataInputPlus(in);
+            payloadStruct.messageIn = MessageIn.read(inputPlus, messagingVersion,
+                                                     messageHeader.messageId, messageHeader.constructionTime, messageHeader.from,
+                                                     messageHeader.payloadSize, messageHeader.verb, messageHeader.parameters);
+
+            return payload;
         }
 
         void close()
@@ -256,25 +295,16 @@ public abstract class BaseMessageInHandler extends ChannelInboundHandlerAdapter
             queuedBuffers.append(in);
         }
 
-        private void process(ChannelHandlerContext ctx)
+        private void processIt(ChannelHandlerContext ctx) throws IOException
         {
             try
             {
                 while (!closed)
                 {
-                    // TODO:JEB this is the blocking version of what's in the MIH.decode() functions.
-                    // Is there a way to make either this function or what's in MIH.decode() functions generic?
-                    // I think that needs to happen, or else it's gonna get ugly ...
+                    // this is a blocking call, which is OK as we're on a background thread here
+                    ByteBuf buf = queuedBuffers.nextBuffer();
+                    process(ctx, buf, this::parseMessage);
 
-                    // also, in the current state, this is completely fucking broken
-                    MessagingService.validateMagic(queuedBuffers.readInt());
-                    int messageId = queuedBuffers.readInt();
-                    int messageTimestamp = queuedBuffers.readInt(); // make sure to read the sent timestamp, even if DatabaseDescriptor.hasCrossNodeTimeout() is not enabled
-                    long constructionTime = MessageIn.deriveConstructionTime(peer, messageTimestamp, ApproximateTime.currentTimeMillis());
-
-                    MessageIn messageIn = MessageIn.read(queuedBuffers, messagingVersion, messageId, constructionTime);
-                    if (messageIn != null)
-                        messageConsumer.accept(messageIn, messageId);
                 }
             }
             catch (EOFException eof)
@@ -290,6 +320,20 @@ public abstract class BaseMessageInHandler extends ChannelInboundHandlerAdapter
                 if (queuedBuffers != null)
                     queuedBuffers.close();
             }
+        }
+
+
+        PayloadStruct parseMessage(ByteBuf in, MessageHeader messageHeader) throws IOException
+        {
+            PayloadStruct payload = this.payloadStruct;
+            payload.reset();
+            payload.fullyParsed = true;
+            ByteBufDataInputPlus inputPlus = new ByteBufDataInputPlus(in);
+            payloadStruct.messageIn = MessageIn.read(inputPlus, messagingVersion,
+                                                     messageHeader.messageId, messageHeader.constructionTime, messageHeader.from,
+                                                     messageHeader.payloadSize, messageHeader.verb, messageHeader.parameters);
+
+            return payload;
         }
 
         void close()

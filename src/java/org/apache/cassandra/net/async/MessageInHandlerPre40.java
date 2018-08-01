@@ -70,7 +70,7 @@ public class MessageInHandlerPre40 extends BaseMessageInHandler
      * maintains a trivial state machine to remember progress across invocations.
      */
     @SuppressWarnings("resource")
-    public void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out)
+    public void process(ChannelHandlerContext ctx, ByteBuf in)
     {
         ByteBufDataInputPlus inputPlus = new ByteBufDataInputPlus(in);
         try
