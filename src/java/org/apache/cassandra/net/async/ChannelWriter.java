@@ -427,6 +427,8 @@ abstract class ChannelWriter
             public void run()
             {
                 // TODO:JEB make the buffer size a constatnt or param, not a magic number
+
+                // TODO:JEB need to write out the message prefix (magic, msgId, timestamp)
                 try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, 64 * 1024, this::handleError))
                 {
                     currentMessage.message.serialize(output, messagingVersion);

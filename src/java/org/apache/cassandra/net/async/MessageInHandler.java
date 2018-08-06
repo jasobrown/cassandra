@@ -76,94 +76,94 @@ public class MessageInHandler extends BaseMessageInHandler
      * attempts to deserialize as much header information as it can out of the incoming {@link ByteBuf}, and
      * maintains a trivial state machine to remember progress across invocations.
      */
-    @SuppressWarnings("resource")
-    public void process(ChannelHandlerContext ctx, ByteBuf in, BiFunction<ByteBuf, MessageHeader, PayloadStruct> payloadParser)
-    {
-        ByteBufDataInputPlus inputPlus = new ByteBufDataInputPlus(in);
-        try
-        {
-            while (true)
-            {
-                switch (state)
-                {
-                    case READ_FIRST_CHUNK:
-                        MessageHeader header = readFirstChunk(in);
-                        if (header == null)
-                            return;
-                        header.from = peer;
-                        messageHeader = header;
-                        state = State.READ_VERB;
-                        // fall-through
-                    case READ_VERB:
-                        if (in.readableBytes() < VERB_LENGTH)
-                            return;
-                        messageHeader.verb = MessagingService.Verb.fromId(in.readInt());
-                        state = State.READ_PARAMETERS_SIZE;
-                        // fall-through
-                    case READ_PARAMETERS_SIZE:
-                        long length = VIntCoding.readUnsignedVInt(in);
-                        if (length < 0)
-                            return;
-                        messageHeader.parameterLength = (int) length;
-                        messageHeader.parameters = messageHeader.parameterLength == 0 ? Collections.emptyMap() : new EnumMap<>(ParameterType.class);
-                        state = State.READ_PARAMETERS_DATA;
-                        // fall-through
-                    case READ_PARAMETERS_DATA:
-                        if (messageHeader.parameterLength > 0)
-                        {
-                            if (in.readableBytes() < messageHeader.parameterLength)
-                                return;
-                            readParameters(in, inputPlus, messageHeader.parameterLength, messageHeader.parameters);
-                        }
-                        state = State.READ_PAYLOAD_SIZE;
-                        // fall-through
-                    case READ_PAYLOAD_SIZE:
-                        length = VIntCoding.readUnsignedVInt(in);
-                        if (length < 0)
-                            return;
-                        messageHeader.payloadSize = (int) length;
-                        state = State.READ_PAYLOAD;
-                        // fall-through
-                    case READ_PAYLOAD:
-                        PayloadStruct payloadStruct = payloadParser.apply(in, messageHeader);
-                        if (!payloadStruct.fullyParsed)
-                            return;
-
-                        // TODO consider deserializing the message not on the event loop
-                        if (payloadStruct.messageIn != null)
-                            messageConsumer.accept(payloadStruct.messageIn, messageHeader.messageId);
-
-                        state = State.READ_FIRST_CHUNK;
-                        messageHeader = null;
-                        break;
-                    default:
-                        throw new IllegalStateException("unknown/unhandled state: " + state);
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            exceptionCaught(ctx, e);
-        }
-    }
-
-    private void readParameters(ByteBuf in, ByteBufDataInputPlus inputPlus, int parameterLength, Map<ParameterType, Object> parameters) throws IOException
-    {
-        // makes the assumption we have all the bytes required to read the headers
-        final int endIndex = in.readerIndex() + parameterLength;
-        while (in.readerIndex() < endIndex)
-        {
-            String key = DataInputStream.readUTF(inputPlus);
-            ParameterType parameterType = ParameterType.byName.get(key);
-            long valueLength =  VIntCoding.readUnsignedVInt(in);
-            byte[] value = new byte[Ints.checkedCast(valueLength)];
-            in.readBytes(value);
-            try (DataInputBuffer buffer = new DataInputBuffer(value))
-            {
-                parameters.put(parameterType, parameterType.serializer.deserialize(buffer, messagingVersion));
-            }
-        }
-    }
+//    @SuppressWarnings("resource")
+//    public void process(ChannelHandlerContext ctx, ByteBuf in, BiFunction<ByteBuf, MessageHeader, PayloadStruct> payloadParser)
+//    {
+//        ByteBufDataInputPlus inputPlus = new ByteBufDataInputPlus(in);
+//        try
+//        {
+//            while (true)
+//            {
+//                switch (state)
+//                {
+//                    case READ_FIRST_CHUNK:
+//                        MessageHeader header = readFirstChunk(in);
+//                        if (header == null)
+//                            return;
+//                        header.from = peer;
+//                        messageHeader = header;
+//                        state = State.READ_VERB;
+//                        // fall-through
+//                    case READ_VERB:
+//                        if (in.readableBytes() < VERB_LENGTH)
+//                            return;
+//                        messageHeader.verb = MessagingService.Verb.fromId(in.readInt());
+//                        state = State.READ_PARAMETERS_SIZE;
+//                        // fall-through
+//                    case READ_PARAMETERS_SIZE:
+//                        long length = VIntCoding.readUnsignedVInt(in);
+//                        if (length < 0)
+//                            return;
+//                        messageHeader.parameterLength = (int) length;
+//                        messageHeader.parameters = messageHeader.parameterLength == 0 ? Collections.emptyMap() : new EnumMap<>(ParameterType.class);
+//                        state = State.READ_PARAMETERS_DATA;
+//                        // fall-through
+//                    case READ_PARAMETERS_DATA:
+//                        if (messageHeader.parameterLength > 0)
+//                        {
+//                            if (in.readableBytes() < messageHeader.parameterLength)
+//                                return;
+//                            readParameters(in, inputPlus, messageHeader.parameterLength, messageHeader.parameters);
+//                        }
+//                        state = State.READ_PAYLOAD_SIZE;
+//                        // fall-through
+//                    case READ_PAYLOAD_SIZE:
+//                        length = VIntCoding.readUnsignedVInt(in);
+//                        if (length < 0)
+//                            return;
+//                        messageHeader.payloadSize = (int) length;
+//                        state = State.READ_PAYLOAD;
+//                        // fall-through
+//                    case READ_PAYLOAD:
+//                        PayloadStruct payloadStruct = payloadParser.apply(in, messageHeader);
+//                        if (!payloadStruct.fullyParsed)
+//                            return;
+//
+//                        // TODO consider deserializing the message not on the event loop
+//                        if (payloadStruct.messageIn != null)
+//                            messageConsumer.accept(payloadStruct.messageIn, messageHeader.messageId);
+//
+//                        state = State.READ_FIRST_CHUNK;
+//                        messageHeader = null;
+//                        break;
+//                    default:
+//                        throw new IllegalStateException("unknown/unhandled state: " + state);
+//                }
+//            }
+//        }
+//        catch (Exception e)
+//        {
+//            exceptionCaught(ctx, e);
+//        }
+//    }
+//
+//    private void readParameters(ByteBuf in, ByteBufDataInputPlus inputPlus, int parameterLength, Map<ParameterType, Object> parameters) throws IOException
+//    {
+//        // makes the assumption we have all the bytes required to read the headers
+//        final int endIndex = in.readerIndex() + parameterLength;
+//        while (in.readerIndex() < endIndex)
+//        {
+//            String key = DataInputStream.readUTF(inputPlus);
+//            ParameterType parameterType = ParameterType.byName.get(key);
+//            long valueLength =  VIntCoding.readUnsignedVInt(in);
+//            byte[] value = new byte[Ints.checkedCast(valueLength)];
+//            in.readBytes(value);
+//            try (DataInputBuffer buffer = new DataInputBuffer(value))
+//            {
+//                parameters.put(parameterType, parameterType.serializer.deserialize(buffer, messagingVersion));
+//            }
+//        }
+//    }
 
     @Override
     MessageHeader getMessageHeader()
