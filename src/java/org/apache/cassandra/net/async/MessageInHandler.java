@@ -18,156 +18,201 @@
 
 package org.apache.cassandra.net.async;
 
-import java.io.DataInputStream;
+import java.io.EOFException;
 import java.io.IOException;
-import java.util.Collections;
-import java.util.EnumMap;
-import java.util.List;
-import java.util.Map;
-import java.util.function.BiConsumer;
-import java.util.function.BiFunction;
 
-import com.google.common.primitives.Ints;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.codec.ByteToMessageDecoder;
-import org.apache.cassandra.db.monitoring.ApproximateTime;
-import org.apache.cassandra.io.util.DataInputBuffer;
+import io.netty.util.concurrent.FastThreadLocalThread;
+import org.apache.cassandra.exceptions.UnknownTableException;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.net.MessageIn;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.net.ParameterType;
-import org.apache.cassandra.utils.vint.VIntCoding;
 
-/**
- * Parses out individual messages from the incoming buffers. Each message, both header and payload, is incrementally built up
- * from the available input data, then passed to the {@link #messageConsumer}.
- *
- * Note: this class derives from {@link ByteToMessageDecoder} to take advantage of the {@link ByteToMessageDecoder.Cumulator}
- * behavior across {@link #decode(ChannelHandlerContext, ByteBuf, List)} invocations. That way we don't have to maintain
- * the not-fully consumed {@link ByteBuf}s.
- */
-public class MessageInHandler extends BaseMessageInHandler
+public class MessageInHandler extends ChannelInboundHandlerAdapter
 {
     public static final Logger logger = LoggerFactory.getLogger(MessageInHandler.class);
 
-    private State state;
-    private MessageHeader messageHeader;
+    final InetAddressAndPort peer;
 
-    MessageInHandler(InetAddressAndPort peer, int messagingVersion)
+    private BufferHandler bufferHandler;
+    private final MessageProcessor messageProcessor;
+    private final boolean handlesLargeMessages;
+
+    public MessageInHandler(InetAddressAndPort peer, MessageProcessor messageProcessor, boolean handlesLargeMessages)
     {
-        this (peer, messagingVersion, MESSAGING_SERVICE_CONSUMER);
+        this.peer = peer;
+        this.messageProcessor = messageProcessor;
+        this.handlesLargeMessages = handlesLargeMessages;
     }
-
-    public MessageInHandler(InetAddressAndPort peer, int messagingVersion, BiConsumer<MessageIn, Integer> messageConsumer)
-    {
-        super(peer, messagingVersion, messageConsumer);
-
-        assert messagingVersion >= MessagingService.VERSION_40 : String.format("wrong messaging version for this handler: got %d, but expect %d or higher",
-                                                                              messagingVersion, MessagingService.VERSION_40);
-        state = State.READ_FIRST_CHUNK;
-    }
-
-    /**
-     * For each new message coming in, builds up a {@link MessageHeader} instance incrementally. This method
-     * attempts to deserialize as much header information as it can out of the incoming {@link ByteBuf}, and
-     * maintains a trivial state machine to remember progress across invocations.
-     */
-//    @SuppressWarnings("resource")
-//    public void process(ChannelHandlerContext ctx, ByteBuf in, BiFunction<ByteBuf, MessageHeader, PayloadStruct> payloadParser)
-//    {
-//        ByteBufDataInputPlus inputPlus = new ByteBufDataInputPlus(in);
-//        try
-//        {
-//            while (true)
-//            {
-//                switch (state)
-//                {
-//                    case READ_FIRST_CHUNK:
-//                        MessageHeader header = readFirstChunk(in);
-//                        if (header == null)
-//                            return;
-//                        header.from = peer;
-//                        messageHeader = header;
-//                        state = State.READ_VERB;
-//                        // fall-through
-//                    case READ_VERB:
-//                        if (in.readableBytes() < VERB_LENGTH)
-//                            return;
-//                        messageHeader.verb = MessagingService.Verb.fromId(in.readInt());
-//                        state = State.READ_PARAMETERS_SIZE;
-//                        // fall-through
-//                    case READ_PARAMETERS_SIZE:
-//                        long length = VIntCoding.readUnsignedVInt(in);
-//                        if (length < 0)
-//                            return;
-//                        messageHeader.parameterLength = (int) length;
-//                        messageHeader.parameters = messageHeader.parameterLength == 0 ? Collections.emptyMap() : new EnumMap<>(ParameterType.class);
-//                        state = State.READ_PARAMETERS_DATA;
-//                        // fall-through
-//                    case READ_PARAMETERS_DATA:
-//                        if (messageHeader.parameterLength > 0)
-//                        {
-//                            if (in.readableBytes() < messageHeader.parameterLength)
-//                                return;
-//                            readParameters(in, inputPlus, messageHeader.parameterLength, messageHeader.parameters);
-//                        }
-//                        state = State.READ_PAYLOAD_SIZE;
-//                        // fall-through
-//                    case READ_PAYLOAD_SIZE:
-//                        length = VIntCoding.readUnsignedVInt(in);
-//                        if (length < 0)
-//                            return;
-//                        messageHeader.payloadSize = (int) length;
-//                        state = State.READ_PAYLOAD;
-//                        // fall-through
-//                    case READ_PAYLOAD:
-//                        PayloadStruct payloadStruct = payloadParser.apply(in, messageHeader);
-//                        if (!payloadStruct.fullyParsed)
-//                            return;
-//
-//                        // TODO consider deserializing the message not on the event loop
-//                        if (payloadStruct.messageIn != null)
-//                            messageConsumer.accept(payloadStruct.messageIn, messageHeader.messageId);
-//
-//                        state = State.READ_FIRST_CHUNK;
-//                        messageHeader = null;
-//                        break;
-//                    default:
-//                        throw new IllegalStateException("unknown/unhandled state: " + state);
-//                }
-//            }
-//        }
-//        catch (Exception e)
-//        {
-//            exceptionCaught(ctx, e);
-//        }
-//    }
-//
-//    private void readParameters(ByteBuf in, ByteBufDataInputPlus inputPlus, int parameterLength, Map<ParameterType, Object> parameters) throws IOException
-//    {
-//        // makes the assumption we have all the bytes required to read the headers
-//        final int endIndex = in.readerIndex() + parameterLength;
-//        while (in.readerIndex() < endIndex)
-//        {
-//            String key = DataInputStream.readUTF(inputPlus);
-//            ParameterType parameterType = ParameterType.byName.get(key);
-//            long valueLength =  VIntCoding.readUnsignedVInt(in);
-//            byte[] value = new byte[Ints.checkedCast(valueLength)];
-//            in.readBytes(value);
-//            try (DataInputBuffer buffer = new DataInputBuffer(value))
-//            {
-//                parameters.put(parameterType, parameterType.serializer.deserialize(buffer, messagingVersion));
-//            }
-//        }
-//    }
 
     @Override
-    MessageHeader getMessageHeader()
+    public void channelActive(ChannelHandlerContext ctx)
     {
-        return messageHeader;
+        if (handlesLargeMessages)
+            bufferHandler = new BackgroundBufferHandler(ctx, messageProcessor);
+        else
+            bufferHandler = new ForegroundBufferHandler(messageProcessor);
+
+        ctx.fireChannelActive();
+    }
+
+
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws IOException
+    {
+//        if (msg )
+        bufferHandler.channelRead(ctx, (ByteBuf) msg);
+    }
+
+    // TODO:JEB reevaluate the error handling once I switch from ByteToMessageDecoder to ChannelInboundHandlerAdapter
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
+    {
+        if (cause instanceof EOFException)
+            logger.trace("eof reading from socket; closing", cause);
+        else if (cause instanceof UnknownTableException)
+            logger.warn("Got message from unknown table while reading from socket; closing", cause);
+        else if (cause instanceof IOException)
+            logger.trace("IOException reading from socket; closing", cause);
+        else
+            logger.warn("Unexpected exception caught in inbound channel pipeline from " + ctx.channel().remoteAddress(), cause);
+
+        ctx.close();
+    }
+
+    public void channelInactive(ChannelHandlerContext ctx)
+    {
+        logger.trace("received channel closed message for peer {} on local addr {}", ctx.channel().remoteAddress(), ctx.channel().localAddress());
+        ctx.fireChannelInactive();
+    }
+
+    interface BufferHandler
+    {
+        void channelRead(ChannelHandlerContext ctx, ByteBuf in) throws IOException;
+
+        void close();
+    }
+
+    class ForegroundBufferHandler implements BufferHandler
+    {
+        private final MessageProcessor messageProcessor;
+        /**
+         * If a buffer is not completely consumed, stash it here for the next invocation of
+         * {@link #channelRead(ChannelHandlerContext, ByteBuf)}.
+         */
+        private ByteBuf retainedInlineBuffer;
+
+        ForegroundBufferHandler(MessageProcessor messageProcessor)
+        {
+            this.messageProcessor = messageProcessor;
+        }
+
+        public void channelRead(ChannelHandlerContext ctx, ByteBuf in)
+        {
+            final ByteBuf toProcess;
+            if (retainedInlineBuffer != null)
+                toProcess = ByteToMessageDecoder.MERGE_CUMULATOR.cumulate(ctx.alloc(), retainedInlineBuffer, in);
+            else
+                toProcess = in;
+
+            try
+            {
+                messageProcessor.process(toProcess);
+            }
+            catch (Throwable cause)
+            {
+                exceptionCaught(ctx, cause);
+            }
+            finally
+            {
+                if (toProcess.isReadable())
+                {
+                    retainedInlineBuffer = toProcess;
+                }
+                else
+                {
+                    toProcess.release();
+                    retainedInlineBuffer = null;
+                }
+            }
+        }
+
+        public void close()
+        {
+            retainedInlineBuffer.release();
+            retainedInlineBuffer = null;
+        }
+    }
+
+    class BackgroundBufferHandler implements BufferHandler
+    {
+        /**
+         * The default low-water mark to set on {@link #queuedBuffers}.
+         * See {@link RebufferingByteBufDataInputPlus} for more information.
+         */
+        private static final int OFFLINE_QUEUE_LOW_WATER_MARK = 1 << 14;
+
+        /**
+         * The default high-water mark to set on {@link #queuedBuffers}.
+         * See {@link RebufferingByteBufDataInputPlus} for more information.
+         */
+        private static final int OFFLINE_QUEUE_HIGH_WATER_MARK = 1 << 15;
+
+        /**
+         * A queue in which to stash incoming {@link ByteBuf}s.
+         */
+        private final RebufferingByteBufDataInputPlus queuedBuffers;
+        private final MessageProcessor messageProcessor;
+
+        private volatile boolean closed;
+
+        BackgroundBufferHandler(ChannelHandlerContext ctx, MessageProcessor messageProcessor)
+        {
+            queuedBuffers = new RebufferingByteBufDataInputPlus(OFFLINE_QUEUE_LOW_WATER_MARK,
+                                                                OFFLINE_QUEUE_HIGH_WATER_MARK,
+                                                                ctx.channel().config());
+            this.messageProcessor = messageProcessor;
+
+            Thread blockingIOThread = new FastThreadLocalThread(() -> processInBackground(ctx));
+            blockingIOThread.setDaemon(true);
+            blockingIOThread.start();
+        }
+
+        public void channelRead(ChannelHandlerContext ctx, ByteBuf in)
+        {
+            // TODO:JEB perhaps put this in a more general location
+            if (closed)
+            {
+                in.release();
+                return;
+            }
+
+            queuedBuffers.append(in);
+        }
+
+        private void processInBackground(ChannelHandlerContext ctx)
+        {
+            try
+            {
+                messageProcessor.process(queuedBuffers);
+            }
+            catch (Throwable cause)
+            {
+                exceptionCaught(ctx, cause);
+            }
+            finally
+            {
+                if (queuedBuffers != null)
+                    queuedBuffers.close();
+            }
+        }
+
+        public void close()
+        {
+            closed = true;
+            queuedBuffers.markClose();
+        }
     }
 }

@@ -376,7 +376,7 @@ public abstract class MessageProcessor
          * instead of checking the remaining readable bytes for each field as we're parsing it. c'est la vie ...
          */
         @VisibleForTesting
-        static boolean canReadNextParam(ByteBuf in)
+        boolean canReadNextParam(ByteBuf in)
         {
             in.markReaderIndex();
             // capture the readableBytes value here to avoid all the virtual function calls.
