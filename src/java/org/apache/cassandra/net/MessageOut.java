@@ -18,10 +18,10 @@
 
 package org.apache.cassandra.net;
 
-import java.io.IOError;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
@@ -78,7 +78,8 @@ import static org.apache.cassandra.tracing.Tracing.isTracing;
  */
 public class MessageOut<T>
 {
-    private static final int SERIALIZED_SIZE_VERSION_UNDEFINED = -1;
+    private static final long UNINITIALIZED_SERIALIZED_SIZE = -1;
+
     //Parameters are stored in an object array as tuples of size two
     public static final int PARAMETER_TUPLE_SIZE = 2;
     //Offset in a parameter tuple containing the type of the parameter
@@ -100,19 +101,16 @@ public class MessageOut<T>
     public final ConnectionType connectionType;
 
     /**
-     * Memoization of the serialized size of the just the payload.
+     * Memoization of the serialized size of the entire message for a specific messaging version.
+     * A packed 8-byte value that stores the following values:
+     *
+     * [0-3] (4 bytes) - payload size
+     * [4-6] (3 bytes) - header size (total - payload)
+     * [7]   (1 byte)  - messaging version that these sizes were calculated against.
      */
-    private int payloadSerializedSize = -1;
+    private volatile long serializedSize = UNINITIALIZED_SERIALIZED_SIZE;
+    private static final AtomicLongFieldUpdater<MessageOut> serializedSizeUpdater = AtomicLongFieldUpdater.newUpdater(MessageOut.class, "serializedSize");
 
-    /**
-     * Memoization of the serialized size of the entire message.
-     */
-    private int serializedSize = -1;
-
-    /**
-     * The internode protocol messaging version that was used to calculate the memoized serailized sizes.
-     */
-    private int serializedSizeVersion = SERIALIZED_SIZE_VERSION_UNDEFINED;
 
     // we do support messages that just consist of a verb
     public MessageOut(MessagingService.Verb verb)
@@ -210,9 +208,9 @@ public class MessageOut<T>
 
         if (payload != null)
         {
-            int payloadSize = payloadSerializedSize >= 0
-                              ? payloadSerializedSize
-                              : (int) serializer.serializedSize(payload, version);
+            int payloadSize = getMessagingVersionFromSerializedSize(serializedSize) == version
+                              ? getPayloadSizeFromSerializedSize(serializedSize)
+                              : Ints.checkedCast(serializer.serializedSize(payload, version));
 
             out.writeUnsignedVInt(payloadSize);
             serializer.serialize(payload, out, version);
@@ -234,9 +232,9 @@ public class MessageOut<T>
 
         if (payload != null)
         {
-            int payloadSize = payloadSerializedSize >= 0
-                              ? payloadSerializedSize
-                              : (int) serializer.serializedSize(payload, version);
+            int payloadSize = getMessagingVersionFromSerializedSize(serializedSize) == version
+                              ? getPayloadSizeFromSerializedSize(serializedSize)
+                              : Ints.checkedCast(serializer.serializedSize(payload, version));
 
             out.writeInt(payloadSize);
             serializer.serialize(payload, out, version);
@@ -275,12 +273,12 @@ public class MessageOut<T>
 
     private MessageOutSizes calculateSerializedSize40(int version)
     {
-        long size = 0;
-        size += TypeSizes.sizeof(verb.getId());
+        int headerSize = 0;
+        headerSize += TypeSizes.sizeof(verb.getId());
 
         if (parameters.isEmpty())
         {
-            size += VIntCoding.computeVIntSize(0);
+            headerSize += VIntCoding.computeVIntSize(0);
         }
         else
         {
@@ -296,39 +294,37 @@ public class MessageOut<T>
                 paramsSize += VIntCoding.computeUnsignedVIntSize(valueLength);//length prefix
                 paramsSize += valueLength;
             }
-            size += VIntCoding.computeUnsignedVIntSize(paramsSize);
-            size += paramsSize;
+            headerSize += VIntCoding.computeUnsignedVIntSize(paramsSize);
+            headerSize += paramsSize;
         }
 
         long payloadSize = payload == null ? 0 : serializer.serializedSize(payload, version);
         assert payloadSize <= Integer.MAX_VALUE; // larger values are supported in sstables but not messages
-        size += VIntCoding.computeUnsignedVIntSize(payloadSize);
-        size += payloadSize;
-        return new MessageOutSizes(size, payloadSize);
+        headerSize += VIntCoding.computeUnsignedVIntSize(payloadSize);
+        return new MessageOutSizes(Ints.checkedCast(headerSize), Ints.checkedCast(payloadSize));
     }
 
     private MessageOutSizes calculateSerializedSizePre40(int version)
     {
-        long size = 0;
-        size += CompactEndpointSerializationHelper.instance.serializedSize(from, version);
+        long headerSize = 0;
+        headerSize += CompactEndpointSerializationHelper.instance.serializedSize(from, version);
 
-        size += TypeSizes.sizeof(verb.getId());
-        size += TypeSizes.sizeof(parameters.size() / PARAMETER_TUPLE_SIZE);
+        headerSize += TypeSizes.sizeof(verb.getId());
+        headerSize += TypeSizes.sizeof(parameters.size() / PARAMETER_TUPLE_SIZE);
         for (int ii = 0; ii < parameters.size(); ii += PARAMETER_TUPLE_SIZE)
         {
             ParameterType type = (ParameterType)parameters.get(ii + PARAMETER_TUPLE_TYPE_OFFSET);
-            size += TypeSizes.sizeof(type.key());
-            size += 4;//length prefix
+            headerSize += TypeSizes.sizeof(type.key());
+            headerSize += 4;//length prefix
             IVersionedSerializer serializer = type.serializer;
             Object parameter = parameters.get(ii + PARAMETER_TUPLE_PARAMETER_OFFSET);
-            size += serializer.serializedSize(parameter, version);
+            headerSize += serializer.serializedSize(parameter, version);
         }
 
         long payloadSize = payload == null ? 0 : serializer.serializedSize(payload, version);
         assert payloadSize <= Integer.MAX_VALUE; // larger values are supported in sstables but not messages
-        size += TypeSizes.sizeof((int) payloadSize);
-        size += payloadSize;
-        return new MessageOutSizes(size, payloadSize);
+        headerSize += TypeSizes.sizeof((int) payloadSize);
+        return new MessageOutSizes(Ints.checkedCast(headerSize), Ints.checkedCast(payloadSize));
     }
 
     /**
@@ -347,21 +343,39 @@ public class MessageOut<T>
      */
     public int serializedSize(int version)
     {
-        if (serializedSize > 0 && serializedSizeVersion == version)
-            return serializedSize;
+        // testing the version should be sufficient to ensure that serializedSize has been initialized
+        if (getMessagingVersionFromSerializedSize(serializedSize) == version)
+            return getMessageSizeFromSerializedSize(serializedSize);
 
         MessageOutSizes sizes = calculateSerializedSize(version);
-        if (sizes.messageSize > Integer.MAX_VALUE)
-            throw new IllegalStateException("message size exceeds maximum allowed size: size = " + sizes.messageSize);
+        // calculateSerializedSize performs bounds checking on the sizes
+        long tmpSerializedSize = buildSerializedSizeValue(sizes, version);
+        serializedSizeUpdater.compareAndSet(this, UNINITIALIZED_SERIALIZED_SIZE, tmpSerializedSize);
+        return Ints.checkedCast(sizes.headerSize + sizes.payloadSize);
+    }
 
-        if (serializedSizeVersion == SERIALIZED_SIZE_VERSION_UNDEFINED)
-        {
-            serializedSize = Ints.checkedCast(sizes.messageSize);
-            payloadSerializedSize = Ints.checkedCast(sizes.payloadSize);
-            serializedSizeVersion = version;
-        }
+    static int getMessagingVersionFromSerializedSize(long serializedSize)
+    {
+        return (int)(serializedSize >> 56);
+    }
 
-        return Ints.checkedCast(sizes.messageSize);
+    static int getMessageSizeFromSerializedSize(long serializedSize)
+    {
+        return (int)serializedSize +
+               (int)((serializedSize >> 32) & 0x7FFFFF);
+    }
+
+    static int getPayloadSizeFromSerializedSize(long serializedSize)
+    {
+        return (int)serializedSize;
+    }
+
+    static long buildSerializedSizeValue(MessageOutSizes sizes, int version)
+    {
+        long val = sizes.payloadSize;
+        val |= ((long)(sizes.headerSize & 0x7FFFFF)) << 32;
+        val |= ((long)version) << 54;
+        return val;
     }
 
     public Object getParameter(ParameterType type)
@@ -376,22 +390,26 @@ public class MessageOut<T>
         return null;
     }
 
+    /**
+     * Simple struct for holding the size of header and payload components of a message.
+     * Total message size can be calculated by summing the components.
+     */
     private static class MessageOutSizes
     {
-        public final long messageSize;
-        public final long payloadSize;
+        public final int headerSize;
+        public final int payloadSize;
 
-        private MessageOutSizes(long messageSize, long payloadSize)
+        private MessageOutSizes(int headerSize, int payloadSize)
         {
-            this.messageSize = messageSize;
+            this.headerSize = headerSize;
             this.payloadSize = payloadSize;
         }
 
         @Override
         public final int hashCode()
         {
-            int hashCode = (int) messageSize ^ (int) (messageSize >>> 32);
-            return 31 * (hashCode ^ (int) ((int) payloadSize ^ (payloadSize >>> 32)));
+            int hashCode = headerSize;
+            return 31 * (hashCode ^ payloadSize);
         }
 
         @Override
@@ -400,7 +418,7 @@ public class MessageOut<T>
             if (!(o instanceof MessageOutSizes))
                 return false;
             MessageOutSizes that = (MessageOutSizes) o;
-            return messageSize == that.messageSize && payloadSize == that.payloadSize;
+            return headerSize == that.headerSize && payloadSize == that.payloadSize;
         }
     }
 }
