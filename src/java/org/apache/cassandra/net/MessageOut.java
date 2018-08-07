@@ -78,7 +78,9 @@ import static org.apache.cassandra.tracing.Tracing.isTracing;
  */
 public class MessageOut<T>
 {
-    private static final long UNINITIALIZED_SERIALIZED_SIZE = -1;
+    static final long UNINITIALIZED_SERIALIZED_SIZE = -1;
+
+    private static final int MAX_HEADER_SIZE = (1 << 24) - 1;
 
     //Parameters are stored in an object array as tuples of size two
     public static final int PARAMETER_TUPLE_SIZE = 2;
@@ -102,11 +104,14 @@ public class MessageOut<T>
 
     /**
      * Memoization of the serialized size of the entire message for a specific messaging version.
-     * A packed 8-byte value that stores the following values:
+     * This is packed 8-byte value that stores the following values:
      *
      * [0-3] (4 bytes) - payload size
      * [4-6] (3 bytes) - header size (total - payload)
      * [7]   (1 byte)  - messaging version that these sizes were calculated against.
+     *
+     * The header should never be more than 2 ^ 24 (~16MB), so three bytes is fine for storing the header size.
+     * We use a packed long as we can CAS on it as a primitive value.
      */
     private volatile long serializedSize = UNINITIALIZED_SERIALIZED_SIZE;
     private static final AtomicLongFieldUpdater<MessageOut> serializedSizeUpdater = AtomicLongFieldUpdater.newUpdater(MessageOut.class, "serializedSize");
@@ -301,6 +306,7 @@ public class MessageOut<T>
         long payloadSize = payload == null ? 0 : serializer.serializedSize(payload, version);
         assert payloadSize <= Integer.MAX_VALUE; // larger values are supported in sstables but not messages
         headerSize += VIntCoding.computeUnsignedVIntSize(payloadSize);
+        assert headerSize <= MAX_HEADER_SIZE;
         return new MessageOutSizes(Ints.checkedCast(headerSize), Ints.checkedCast(payloadSize));
     }
 
@@ -324,19 +330,14 @@ public class MessageOut<T>
         long payloadSize = payload == null ? 0 : serializer.serializedSize(payload, version);
         assert payloadSize <= Integer.MAX_VALUE; // larger values are supported in sstables but not messages
         headerSize += TypeSizes.sizeof((int) payloadSize);
+        assert headerSize <= MAX_HEADER_SIZE;
         return new MessageOutSizes(Ints.checkedCast(headerSize), Ints.checkedCast(payloadSize));
     }
 
     /**
-     * Calculate the size of this message for the specified protocol version and memoize the result for the specified
-     * protocol version. Memoization only covers the protocol version of the first invocation.
-     *
-     * It is not safe to call this function concurrently from multiple threads unless it has already been invoked
-     * once from a single thread and there is a happens before relationship between that invocation and other
-     * threads concurrently invoking this function.
-     *
-     * For instance it would be safe to invokePayload size to make a decision in the thread that created the message
-     * and then hand it off to other threads via a thread-safe queue, volatile write, or synchronized/ReentrantLock.
+     * Calculate the size of this message for the specified protocol version and possibly memoize the result for the specified
+     * protocol version. Memoization only covers the protocol version of the first invocation, or which ever thread
+     * won a race to update {@link #serializedSize}.
      *
      * @param version Protocol version to use when calculating size
      * @return Size of this message in bytes, which will be less than or equal to {@link Integer#MAX_VALUE}
@@ -374,7 +375,7 @@ public class MessageOut<T>
     {
         long val = sizes.payloadSize;
         val |= ((long)(sizes.headerSize & 0x7FFFFF)) << 32;
-        val |= ((long)version) << 54;
+        val |= ((long)version) << 56;
         return val;
     }
 
@@ -394,12 +395,12 @@ public class MessageOut<T>
      * Simple struct for holding the size of header and payload components of a message.
      * Total message size can be calculated by summing the components.
      */
-    private static class MessageOutSizes
+    static class MessageOutSizes
     {
         public final int headerSize;
         public final int payloadSize;
 
-        private MessageOutSizes(int headerSize, int payloadSize)
+        MessageOutSizes(int headerSize, int payloadSize)
         {
             this.headerSize = headerSize;
             this.payloadSize = payloadSize;
@@ -420,5 +421,11 @@ public class MessageOut<T>
             MessageOutSizes that = (MessageOutSizes) o;
             return headerSize == that.headerSize && payloadSize == that.payloadSize;
         }
+    }
+
+    @VisibleForTesting
+    long getSerializedSize()
+    {
+        return serializedSize;
     }
 }
