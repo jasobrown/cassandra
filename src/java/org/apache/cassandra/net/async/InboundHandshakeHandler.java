@@ -1,7 +1,6 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.List;
@@ -56,6 +55,11 @@ class InboundHandshakeHandler extends ByteToMessageDecoder
      * Does the peer support (or want to use) compressed data?
      */
     private boolean compressed;
+
+    /**
+     * Does the peer intend to send large messages on this connection?
+     */
+    private boolean largeMessages;
 
     /**
      * A future the essentially places a timeout on how long we'll wait for the peer
@@ -186,6 +190,7 @@ class InboundHandshakeHandler extends ByteToMessageDecoder
 
             logger.trace("Connection version {} from {}", version, ctx.channel().remoteAddress());
             compressed = msg.compressionEnabled;
+            largeMessages = msg.largeMessagesIntent;
 
             // if this version is < the MS version the other node is trying
             // to connect with, the other node will disconnect
@@ -260,9 +265,10 @@ class InboundHandshakeHandler extends ByteToMessageDecoder
         if (compressed)
             pipeline.addLast(NettyFactory.INBOUND_COMPRESSOR_HANDLER_NAME, NettyFactory.createLz4Decoder(messagingVersion));
 
-        BaseMessageInHandler messageInHandler = messagingVersion >= MessagingService.VERSION_40
-                                                ? new MessageInHandler(peer, messagingVersion)
-                                                : new MessageInHandlerPre40(peer, messagingVersion);
+        MessageInProcessor messageProcessor = messagingVersion >= MessagingService.VERSION_40
+                                              ? new MessageProcessorAsOf40(peer, messagingVersion)
+                                              : new MessageProcessorPre40(peer, messagingVersion);
+        MessageInHandler messageInHandler = new MessageInHandler(peer, messageProcessor, largeMessages);
 
         pipeline.addLast("messageInHandler", messageInHandler);
         pipeline.remove(this);

@@ -179,7 +179,8 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
             }
 
             return bytesTransferred;
-        } catch (Exception e)
+        }
+        catch (Exception e)
         {
             if (f.isOpen())
                 f.close();

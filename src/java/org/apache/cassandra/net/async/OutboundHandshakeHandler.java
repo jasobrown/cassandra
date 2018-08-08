@@ -101,9 +101,10 @@ public class OutboundHandshakeHandler extends ByteToMessageDecoder
      * containing the streaming protocol version, is all that is required.
      */
     @Override
-    public void channelActive(final ChannelHandlerContext ctx) throws Exception
+    public void channelActive(final ChannelHandlerContext ctx)
     {
-        FirstHandshakeMessage msg = new FirstHandshakeMessage(messagingVersion, mode, params.compress);
+        boolean largeMessages = params.connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE;
+        FirstHandshakeMessage msg = new FirstHandshakeMessage(messagingVersion, mode, params.compress, largeMessages);
         logger.trace("starting handshake with peer {}, msg = {}", connectionId.connectionAddress(), msg);
         ctx.writeAndFlush(msg.encode(ctx.alloc())).addListener(future -> firstHandshakeMessageListener(future, ctx));
 

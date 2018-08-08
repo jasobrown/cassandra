@@ -39,10 +39,10 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
     final InetAddressAndPort peer;
 
     private BufferHandler bufferHandler;
-    private final MessageProcessor messageProcessor;
+    private final MessageInProcessor messageProcessor;
     private final boolean handlesLargeMessages;
 
-    public MessageInHandler(InetAddressAndPort peer, MessageProcessor messageProcessor, boolean handlesLargeMessages)
+    public MessageInHandler(InetAddressAndPort peer, MessageInProcessor messageProcessor, boolean handlesLargeMessages)
     {
         this.peer = peer;
         this.messageProcessor = messageProcessor;
@@ -63,7 +63,6 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
 
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws IOException
     {
-//        if (msg )
         bufferHandler.channelRead(ctx, (ByteBuf) msg);
     }
 
@@ -97,14 +96,14 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
 
     class ForegroundBufferHandler implements BufferHandler
     {
-        private final MessageProcessor messageProcessor;
+        private final MessageInProcessor messageProcessor;
         /**
          * If a buffer is not completely consumed, stash it here for the next invocation of
          * {@link #channelRead(ChannelHandlerContext, ByteBuf)}.
          */
         private ByteBuf retainedInlineBuffer;
 
-        ForegroundBufferHandler(MessageProcessor messageProcessor)
+        ForegroundBufferHandler(MessageInProcessor messageProcessor)
         {
             this.messageProcessor = messageProcessor;
         }
@@ -164,11 +163,11 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
          * A queue in which to stash incoming {@link ByteBuf}s.
          */
         private final RebufferingByteBufDataInputPlus queuedBuffers;
-        private final MessageProcessor messageProcessor;
+        private final MessageInProcessor messageProcessor;
 
         private volatile boolean closed;
 
-        BackgroundBufferHandler(ChannelHandlerContext ctx, MessageProcessor messageProcessor)
+        BackgroundBufferHandler(ChannelHandlerContext ctx, MessageInProcessor messageProcessor)
         {
             queuedBuffers = new RebufferingByteBufDataInputPlus(OFFLINE_QUEUE_LOW_WATER_MARK,
                                                                 OFFLINE_QUEUE_HIGH_WATER_MARK,

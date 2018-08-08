@@ -173,7 +173,7 @@ abstract class ChannelWriter
     static ChannelWriter create(Channel channel, OutboundConnectionParams params)
     {
         if (params.connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE)
-            return new LargeMessageChannelWriter(channel, params.messageResultConsumer, params.protocolVersion);
+            return new LargeMessageChannelWriter(channel, params.messageResultConsumer, params.protocolVersion, params.connectionId);
 
         return params.coalescingStrategy.isPresent()
                ? new CoalescingChannelWriter(channel, params.messageResultConsumer, params.coalescingStrategy.get())
@@ -360,14 +360,17 @@ abstract class ChannelWriter
     @VisibleForTesting
     static class LargeMessageChannelWriter extends ChannelWriter
     {
+        private static final int DEFAULT_BUFFER_SIZE = 64 * 1024;
         private final BlockingQueue<Runnable> queue;
         private final ExecutorService svc;
         private final int messagingVersion;
+        private final OutboundConnectionIdentifier connectionId;
 
-        protected LargeMessageChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, int messagingVersion)
+        protected LargeMessageChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, int messagingVersion, OutboundConnectionIdentifier connectionId)
         {
             super(channel, messageResultConsumer);
             this.messagingVersion = messagingVersion;
+            this.connectionId = connectionId;
 
             // explicitly set the queue's capacity to 1, to ensure we don't build up a backlog.
             // note: this still isn't quite what we want here, but getting there ....
@@ -407,7 +410,6 @@ abstract class ChannelWriter
 
         public void close()
         {
-            // TODO:JEB not sure which should come first ....
             super.close();
             svc.shutdownNow();
         }
@@ -426,18 +428,16 @@ abstract class ChannelWriter
             @Override
             public void run()
             {
-                // TODO:JEB make the buffer size a constatnt or param, not a magic number
-
-                // TODO:JEB need to write out the message prefix (magic, msgId, timestamp)
-                try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, 64 * 1024, this::handleError))
+                try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE, this::handleError))
                 {
-                    currentMessage.message.serialize(output, messagingVersion);
+                    currentMessage.serialize(output, messagingVersion, connectionId);
                     pendingMessageCount.decrementAndGet();
-                    channel.flush();
+                    output.flush();
                     aggregatePromise.setSuccess();
                 }
                 catch (Exception e)
                 {
+                    // TODO:JEB close the queue / channel ??
                     aggregatePromise.setFailure(e);
                 }
             }
