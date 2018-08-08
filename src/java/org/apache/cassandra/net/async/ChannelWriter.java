@@ -299,7 +299,6 @@ abstract class ChannelWriter
         channel.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
     }
 
-    @VisibleForTesting
     boolean isClosed()
     {
         return closed;
@@ -360,7 +359,17 @@ abstract class ChannelWriter
         }
     }
 
-    // TODO:JEB document me!!!!
+    /**
+     * A specialized implementation for handling large messages, as defined by
+     * {@link OutboundMessagingPool#LARGE_MESSAGE_THRESHOLD}. The idea here is that we do not want to allocate a
+     * large buffer to serialize into as that would cause bad memory pressure: imagine a message that's 100MB
+     * in size, and, worse yet, then we would allocate one buffer per the message fan out.
+     *
+     * Here we serialize into a {@link ByteBufDataOutputStreamPlus}, which chunks the message into
+     * n {@link #DEFAULT_BUFFER_SIZE} allocations, and it also manages the amount of unacked data in the channel.
+     * This saves us from allocating the one huge buffer as well as making sure we do not naively dump all the serialized
+     * data into the channel, across multiple, smaller blocks.
+     */
     @VisibleForTesting
     static class LargeMessageChannelWriter extends ChannelWriter
     {
@@ -432,12 +441,16 @@ abstract class ChannelWriter
             @Override
             public void run()
             {
+                // TODO:JEB this does not run firever (until close signal)
                 try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE, this::handleError, 30, TimeUnit.SECONDS))
                 {
-                    currentMessage.message.serialize(output, messagingVersion, connectionId, currentMessage.id, currentMessage.timestampNanos);
-                    pendingMessageCount.decrementAndGet();
-                    output.flush();
-                    aggregatePromise.setSuccess();
+                    while (!isClosed())
+                    {
+                        currentMessage.message.serialize(output, messagingVersion, connectionId, currentMessage.id, currentMessage.timestampNanos);
+                        pendingMessageCount.decrementAndGet();
+                        output.flush();
+                        aggregatePromise.setSuccess();
+                    }
                 }
                 catch (Exception e)
                 {
@@ -446,6 +459,9 @@ abstract class ChannelWriter
                 }
             }
 
+            /**
+             * Invoked when an error occurs trying to write to the channel
+             */
             void handleError(Throwable t)
             {
                 aggregatePromise.setFailure(t);
