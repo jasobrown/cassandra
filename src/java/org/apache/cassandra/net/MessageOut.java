@@ -18,14 +18,17 @@
 
 package org.apache.cassandra.net;
 
-import java.io.IOError;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.db.TypeSizes;
@@ -33,9 +36,13 @@ import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.net.async.OutboundConnectionIdentifier;
 import org.apache.cassandra.net.async.OutboundConnectionIdentifier.ConnectionType;
+import org.apache.cassandra.tracing.TraceState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.NanoTimeToCurrentTimeMillis;
+import org.apache.cassandra.utils.UUIDGen;
 import org.apache.cassandra.utils.vint.VIntCoding;
 
 import static org.apache.cassandra.tracing.Tracing.isTracing;
@@ -78,13 +85,20 @@ import static org.apache.cassandra.tracing.Tracing.isTracing;
  */
 public class MessageOut<T>
 {
+    private static final Logger logger = LoggerFactory.getLogger(MessageOut.class);
+
+    /**
+     * The amount of prefix data, in bytes, before the serialized message.
+     */
+    public static final int MESSAGE_PREFIX_SIZE = 12;
+
     private static final int SERIALIZED_SIZE_VERSION_UNDEFINED = -1;
     //Parameters are stored in an object array as tuples of size two
-    public static final int PARAMETER_TUPLE_SIZE = 2;
+    private static final int PARAMETER_TUPLE_SIZE = 2;
     //Offset in a parameter tuple containing the type of the parameter
-    public static final int PARAMETER_TUPLE_TYPE_OFFSET = 0;
+    private static final int PARAMETER_TUPLE_TYPE_OFFSET = 0;
     //Offset in a parameter tuple containing the actual parameter represented as a POJO
-    public static final int PARAMETER_TUPLE_PARAMETER_OFFSET = 1;
+    private static final int PARAMETER_TUPLE_PARAMETER_OFFSET = 1;
 
     public final InetAddressAndPort from;
     public final MessagingService.Verb verb;
@@ -178,6 +192,70 @@ public class MessageOut<T>
         StringBuilder sbuf = new StringBuilder();
         sbuf.append("TYPE:").append(getStage()).append(" VERB:").append(verb);
         return sbuf.toString();
+    }
+
+    /**
+     * TThe main entry point for sending an internode message to a peer node in the cluster.
+     */
+    public void serialize(DataOutputPlus out, int messagingVersion, OutboundConnectionIdentifier destinationId, int id, long timestampNanos) throws IOException
+    {
+        captureTracingInfo(messagingVersion, destinationId);
+
+        out.writeInt(MessagingService.PROTOCOL_MAGIC);
+        out.writeInt(id);
+
+        // int cast cuts off the high-order half of the timestamp, which we can assume remains
+        // the same between now and when the recipient reconstructs it.
+        out.writeInt((int) NanoTimeToCurrentTimeMillis.convert(timestampNanos));
+        serialize(out, messagingVersion);
+    }
+
+    /**
+     * Record any tracing data, if enabled on this message.
+     */
+    @VisibleForTesting
+    void captureTracingInfo(int messagingVersion, OutboundConnectionIdentifier destinationId)
+    {
+        try
+        {
+            UUID sessionId =  (UUID)getParameter(ParameterType.TRACE_SESSION);
+            if (sessionId != null)
+            {
+                TraceState state = Tracing.instance.get(sessionId);
+                String logMessage = String.format("Sending %s message to %s, size = %d bytes",
+                                                  verb, destinationId.connectionAddress(),
+                                                  serializedSize(messagingVersion) + MESSAGE_PREFIX_SIZE);
+                // session may have already finished; see CASSANDRA-5668
+                if (state == null)
+                {
+                    Tracing.TraceType traceType = (Tracing.TraceType)getParameter(ParameterType.TRACE_TYPE);
+                    traceType = traceType == null ? Tracing.TraceType.QUERY : traceType;
+                    Tracing.instance.trace(ByteBuffer.wrap(UUIDGen.decompose(sessionId)), logMessage, traceType.getTTL());
+                }
+                else
+                {
+                    state.trace(logMessage);
+                    if (verb == MessagingService.Verb.REQUEST_RESPONSE)
+                        Tracing.instance.doneWithNonLocalSession(state);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            logger.warn("failed to capture the tracing info for an outbound message to {}, ignoring", destinationId, e);
+        }
+    }
+
+    private Object getParameter(ParameterType type)
+    {
+        for (int ii = 0; ii < parameters.size(); ii += PARAMETER_TUPLE_SIZE)
+        {
+            if (((ParameterType)parameters.get(ii + PARAMETER_TUPLE_TYPE_OFFSET)).equals(type))
+            {
+                return parameters.get(ii + PARAMETER_TUPLE_PARAMETER_OFFSET);
+            }
+        }
+        return null;
     }
 
     public void serialize(DataOutputPlus out, int version) throws IOException
@@ -364,22 +442,10 @@ public class MessageOut<T>
         return Ints.checkedCast(sizes.messageSize);
     }
 
-    public Object getParameter(ParameterType type)
-    {
-        for (int ii = 0; ii < parameters.size(); ii += PARAMETER_TUPLE_SIZE)
-        {
-            if (((ParameterType)parameters.get(ii + PARAMETER_TUPLE_TYPE_OFFSET)).equals(type))
-            {
-                return parameters.get(ii + PARAMETER_TUPLE_PARAMETER_OFFSET);
-            }
-        }
-        return null;
-    }
-
     private static class MessageOutSizes
     {
-        public final long messageSize;
-        public final long payloadSize;
+        final long messageSize;
+        final long payloadSize;
 
         private MessageOutSizes(long messageSize, long payloadSize)
         {

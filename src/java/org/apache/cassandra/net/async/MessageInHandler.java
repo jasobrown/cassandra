@@ -31,6 +31,7 @@ import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.util.concurrent.FastThreadLocalThread;
 import org.apache.cassandra.exceptions.UnknownTableException;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.net.MessageIn.MessageInProcessor;
 
 public class MessageInHandler extends ChannelInboundHandlerAdapter
 {
@@ -151,6 +152,7 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
          * The default low-water mark to set on {@link #queuedBuffers}.
          * See {@link RebufferingByteBufDataInputPlus} for more information.
          */
+        // TODO:JEB rename me
         private static final int OFFLINE_QUEUE_LOW_WATER_MARK = 1 << 14;
 
         /**

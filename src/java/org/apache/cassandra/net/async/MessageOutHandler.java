@@ -34,6 +34,7 @@ import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.UnsupportedMessageTypeException;
 import io.netty.handler.timeout.IdleState;
 import io.netty.handler.timeout.IdleStateEvent;
+import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.utils.NoSpamLogger;
 
 import static org.apache.cassandra.config.Config.PROPERTY_PREFIX;
@@ -61,11 +62,6 @@ class MessageOutHandler extends ChannelDuplexHandler
     // reatining the pre 4.0 property name for backward compatibility.
     private static final String AUTO_FLUSH_PROPERTY = PROPERTY_PREFIX + "otc_buffer_size";
     static final int AUTO_FLUSH_THRESHOLD = Integer.getInteger(AUTO_FLUSH_PROPERTY, DEFAULT_AUTO_FLUSH_THRESHOLD);
-
-    /**
-     * The amount of prefix data, in bytes, before the serialized message.
-     */
-    static final int MESSAGE_PREFIX_SIZE = 12;
 
     private final OutboundConnectionIdentifier connectionId;
 
@@ -120,7 +116,7 @@ class MessageOutHandler extends ChannelDuplexHandler
             // frame size includes the magic and and other values *before* the actual serialized message.
             // note: don't even bother to check the compressed size (if compression is enabled for the channel),
             // cuz if it's this large already, we're probably screwed anyway
-            long currentFrameSize = MESSAGE_PREFIX_SIZE + (long)msg.message.serializedSize(targetMessagingVersion);
+            long currentFrameSize = MessageOut.MESSAGE_PREFIX_SIZE + (long)msg.message.serializedSize(targetMessagingVersion);
             if (currentFrameSize > Integer.MAX_VALUE || currentFrameSize < 0)
             {
                 promise.tryFailure(new IllegalStateException(String.format("%s illegal frame size: %d, ignoring message", connectionId, currentFrameSize)));
@@ -128,7 +124,7 @@ class MessageOutHandler extends ChannelDuplexHandler
             }
 
             out = ctx.alloc().ioBuffer((int)currentFrameSize);
-            msg.serialize(new ByteBufDataOutputPlus(out), targetMessagingVersion, connectionId);
+            msg.message.serialize(new ByteBufDataOutputPlus(out), targetMessagingVersion, connectionId, msg.id, msg.timestampNanos);
 
             // next few lines are for debugging ... massively helpful!!
             // if we allocated too much buffer for this message, we'll log here.
@@ -136,7 +132,6 @@ class MessageOutHandler extends ChannelDuplexHandler
             if (out.isWritable())
                 errorLogger.error("{} reported message size {}, actual message size {}, msg {}",
                                   connectionId, out.capacity(), out.writerIndex(), msg.message);
-
 
             ctx.write(out, promise);
 

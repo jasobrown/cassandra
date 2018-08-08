@@ -17,10 +17,7 @@
  */
 package org.apache.cassandra.net.async;
 
-import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
-import java.net.InetAddress;
 import java.util.Objects;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -28,8 +25,6 @@ import com.google.common.primitives.Ints;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
-import io.netty.buffer.ByteBufInputStream;
-import io.netty.buffer.ByteBufOutputStream;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -78,7 +73,7 @@ public class HandshakeProtocol
      * UNU - unused bits lowest two bits; from a historical note: used to be "serializer type," which was always Binary
      * CMP - compression enabled bit
      * MOD - connection mode. If the bit is on, the connection is for streaming; if the bit is off, it is for inter-node messaging.
-     * LRG - large messages flag. If the bit is on, the sender intends to send large messages on this connection.
+     * LRG - large messages advisory flag. If the bit is on, the sender intends to send large messages on this connection.
      * VERSION - if a streaming connection, indicates the streaming protocol version {@link org.apache.cassandra.streaming.messages.StreamMessage#CURRENT_VERSION};
      * if a messaging connection, indicates the messaging protocol version the initiator *thinks* should be used.
      */
@@ -90,15 +85,15 @@ public class HandshakeProtocol
         final int messagingVersion;
         final NettyFactory.Mode mode;
         final boolean compressionEnabled;
-        final boolean largeMessagesIntent;
+        final boolean largeMessagesAdvisory;
 
-        public FirstHandshakeMessage(int messagingVersion, NettyFactory.Mode mode, boolean compressionEnabled, boolean largeMessagesIntent)
+        public FirstHandshakeMessage(int messagingVersion, NettyFactory.Mode mode, boolean compressionEnabled, boolean largeMessagesAdvisory)
         {
             assert messagingVersion > 0;
             this.messagingVersion = messagingVersion;
             this.mode = mode;
             this.compressionEnabled = compressionEnabled;
-            this.largeMessagesIntent = largeMessagesIntent;
+            this.largeMessagesAdvisory = largeMessagesAdvisory;
         }
 
         @VisibleForTesting
@@ -109,7 +104,7 @@ public class HandshakeProtocol
                 flags |= 1 << 2;
             if (mode == NettyFactory.Mode.STREAMING)
                 flags |= 1 << 3;
-            if (largeMessagesIntent)
+            if (largeMessagesAdvisory)
                 flags |= 1 << 4;
 
             flags |= (messagingVersion << 8);
@@ -150,19 +145,21 @@ public class HandshakeProtocol
             FirstHandshakeMessage that = (FirstHandshakeMessage)other;
             return this.messagingVersion == that.messagingVersion
                    && this.mode == that.mode
-                   && this.compressionEnabled == that.compressionEnabled;
+                   && this.compressionEnabled == that.compressionEnabled
+                   && this.largeMessagesAdvisory == that.largeMessagesAdvisory;
         }
 
         @Override
         public int hashCode()
         {
-            return Objects.hash(messagingVersion, mode, compressionEnabled);
+            return Objects.hash(messagingVersion, mode, compressionEnabled, largeMessagesAdvisory);
         }
 
         @Override
         public String toString()
         {
-            return String.format("FirstHandshakeMessage - messaging version: %d, mode: %s, compress: %b", messagingVersion, mode, compressionEnabled);
+            return String.format("FirstHandshakeMessage - messaging version: %d, mode: %s, compress: %b, large messages: %b",
+                                 messagingVersion, mode, compressionEnabled, largeMessagesAdvisory);
         }
     }
 

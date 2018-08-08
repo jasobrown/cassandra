@@ -22,6 +22,7 @@ import io.netty.handler.ssl.SslHandler;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.async.HandshakeProtocol.FirstHandshakeMessage;
 import org.apache.cassandra.net.async.HandshakeProtocol.SecondHandshakeMessage;
@@ -190,7 +191,7 @@ class InboundHandshakeHandler extends ByteToMessageDecoder
 
             logger.trace("Connection version {} from {}", version, ctx.channel().remoteAddress());
             compressed = msg.compressionEnabled;
-            largeMessages = msg.largeMessagesIntent;
+            largeMessages = msg.largeMessagesAdvisory;
 
             // if this version is < the MS version the other node is trying
             // to connect with, the other node will disconnect
@@ -228,7 +229,7 @@ class InboundHandshakeHandler extends ByteToMessageDecoder
      * IP addr the peer wants to use.
      */
     @VisibleForTesting
-    State handleMessagingStartResponse(ChannelHandlerContext ctx, ByteBuf in) throws IOException
+    State handleMessagingStartResponse(ChannelHandlerContext ctx, ByteBuf in)
     {
         ThirdHandshakeMessage msg = ThirdHandshakeMessage.maybeDecode(in);
         if (msg == null)
@@ -265,11 +266,7 @@ class InboundHandshakeHandler extends ByteToMessageDecoder
         if (compressed)
             pipeline.addLast(NettyFactory.INBOUND_COMPRESSOR_HANDLER_NAME, NettyFactory.createLz4Decoder(messagingVersion));
 
-        MessageInProcessor messageProcessor = messagingVersion >= MessagingService.VERSION_40
-                                              ? new MessageProcessorAsOf40(peer, messagingVersion)
-                                              : new MessageProcessorPre40(peer, messagingVersion);
-        MessageInHandler messageInHandler = new MessageInHandler(peer, messageProcessor, largeMessages);
-
+        MessageInHandler messageInHandler = new MessageInHandler(peer, MessageIn.getProcessor(peer, messagingVersion), largeMessages);
         pipeline.addLast("messageInHandler", messageInHandler);
         pipeline.remove(this);
     }

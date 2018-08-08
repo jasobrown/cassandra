@@ -263,8 +263,12 @@ abstract class ChannelWriter
         return count;
     }
 
-    // TODO:JEB rename me
-    boolean requiresMessageSerializer()
+    /**
+     * Indicates this implementation requires a handler in the netty pipeline to perform the message serialization.
+     * If false, the expectation is the implementation will perform the serialization itself, outside of the pipeline;
+     * most implementations should not do this.
+     */
+    boolean requiresSerializerInPipeline()
     {
         return true;
     }
@@ -378,7 +382,7 @@ abstract class ChannelWriter
             this.svc = new ThreadPoolExecutor(1, 1, 10L, TimeUnit.SECONDS, queue, new NamedThreadFactory("LargeMessageWriter"));
         }
 
-        boolean requiresMessageSerializer()
+        boolean requiresSerializerInPipeline()
         {
             return false;
         }
@@ -430,7 +434,7 @@ abstract class ChannelWriter
             {
                 try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE, this::handleError))
                 {
-                    currentMessage.serialize(output, messagingVersion, connectionId);
+                    currentMessage.message.serialize(output, messagingVersion, connectionId, currentMessage.id, currentMessage.timestampNanos);
                     pendingMessageCount.decrementAndGet();
                     output.flush();
                     aggregatePromise.setSuccess();
