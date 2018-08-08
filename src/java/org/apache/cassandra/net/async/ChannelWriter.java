@@ -432,7 +432,7 @@ abstract class ChannelWriter
             @Override
             public void run()
             {
-                try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE, this::handleError))
+                try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE, this::handleError, 30, TimeUnit.SECONDS))
                 {
                     currentMessage.message.serialize(output, messagingVersion, connectionId, currentMessage.id, currentMessage.timestampNanos);
                     pendingMessageCount.decrementAndGet();
