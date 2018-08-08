@@ -48,10 +48,20 @@ import org.apache.cassandra.utils.vint.VIntCoding;
 import static org.apache.cassandra.tracing.Tracing.isTracing;
 
 /**
+ * // TODO:JEB update me
  * Each message contains a header with several fixed fields, an optional key-value parameters section, and then
- * the message payload itself. Note: the legacy IP address (pre-4.0) in the header may be either IPv4 (4 bytes)
- * or IPv6 (16 bytes). The diagram below shows the IPv4 address for brevity. In pre-4.0, the payloadSize was
- * encoded as a 4-byte integer; in 4.0 and up it is an unsigned byte (255 parameters should be enough for anyone).
+ * the message payload itself. Below is a visualization of the layout.
+ *
+ *  The parameters are prefixed by a length in bytes for the entire parameter section; this value is encoded as unsigned vint.
+ *  An individual parameter has a String key (more specifically, a {@link ParameterType}), and a byte array value.
+ *  The key is serialized with it's length, encoded as two bytes, followed by the UTF-8 byte encoding of the string
+ *  (see {@link java.io.DataOutput#writeUTF(java.lang.String)}). The parameter value is prefixed with it's length,
+ *  encoded as an unsigned vint, followed by by the value's bytes.
+ *
+ * Legacy Notes (see {@link #serializePre40(DataOutputPlus, int)} for complete details):
+ * - pre 4.0, the IP address was sent along in the header, before the verb. The IP address may be either IPv4 (4 bytes) or IPv6 (16 bytes).
+ * - In pre-4.0, the payloadSize was encoded as a 4-byte integer; in 4.0 and up it is an unsigned vint.
+ * - In pre-4.0, the length of a parameter values was encoded as a 4-byte integer; in 4.0 and up it is an unsigned vint.
  *
  * <pre>
  * {@code
@@ -76,10 +86,6 @@ import static org.apache.cassandra.tracing.Tracing.isTracing;
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  * }
  * </pre>
- *
- * An individual parameter has a String key and a byte array value. The key is serialized with it's length,
- * encoded as two bytes, followed by the UTF-8 byte encoding of the string (see {@link java.io.DataOutput#writeUTF(java.lang.String)}).
- * The body is serialized with it's length, encoded as four bytes, followed by the bytes of the value.
  *
  * * @param <T> The type of the message payload.
  */
@@ -195,7 +201,7 @@ public class MessageOut<T>
     }
 
     /**
-     * TThe main entry point for sending an internode message to a peer node in the cluster.
+     * The main entry point for sending an internode message to a peer node in the cluster.
      */
     public void serialize(DataOutputPlus out, int messagingVersion, OutboundConnectionIdentifier destinationId, int id, long timestampNanos) throws IOException
     {
@@ -258,6 +264,11 @@ public class MessageOut<T>
         return null;
     }
 
+    /**
+     * Use {@link #serialize(DataOutputPlus, int, OutboundConnectionIdentifier, int, long)} as the main entry point
+     * for writing out a message.
+     */
+    @VisibleForTesting
     public void serialize(DataOutputPlus out, int version) throws IOException
     {
         if (version >= MessagingService.VERSION_40)
