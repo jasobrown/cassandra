@@ -250,9 +250,19 @@ public class MessageIn<T>
 
     }
 
+    /**
+     * Implementations contain the mechanics and logic of parsing incoming messages. Allows for both non-blocking
+     * and blocking styles of interaction via the {@link #process(ByteBuf)} and {@link #process(RebufferingByteBufDataInputPlus)}
+     * methods, respectively.
+     *
+     * Does not contain the actual deserialization code for message fields nor payload. That is left to the
+     * {@link MessageIn#read(DataInputPlus, int, int)} family of methods.
+     */
     public static abstract class MessageInProcessor
     {
-        // TODO:JEB document how this is only relevant to the non-blocking use cases
+        /**
+         * The current state of deserializing an incoming message. This enum is only used in the nonblocking versions.
+         */
         enum State
         {
             READ_FIRST_CHUNK,
@@ -263,12 +273,6 @@ public class MessageIn<T>
             READ_PAYLOAD_SIZE,
             READ_PAYLOAD
         }
-
-        /**
-         * The byte count for magic, msg id, timestamp values.
-         */
-        @VisibleForTesting
-        static final int FIRST_SECTION_BYTE_COUNT = 12;
 
         static final int VERB_LENGTH = Integer.BYTES;
 
@@ -286,14 +290,26 @@ public class MessageIn<T>
          */
         final BiConsumer<MessageIn, Integer> messageConsumer;
 
-        // TODO:JEB these fields are only used in the non-blocking case
+        /**
+         * Captures the current {@link State} of processing a message. Primarily useful in the non-blocking use case.
+         */
         State state;
+
+        /**
+         * Captures the current data we've parsed out of in incoming message. Primarily useful in the non-blocking use case.
+         */
         MessageHeader messageHeader;
 
-        // non-blocking
+        /**
+         * Process the buffer in a non-blocking manner. Will try to read out as much of a message(s) as possible,
+         * and send any fully deserialized messages to {@link #messageConsumer}.
+         */
         public abstract void process(ByteBuf in) throws IOException;
 
-        //blocking
+        /**
+         * Process the buffer in a blocking manner. Will read as many messages as possible, blocking for more data,
+         * and send any fully deserialized messages to {@link #messageConsumer}.
+         */
         public abstract void process(RebufferingByteBufDataInputPlus in) throws IOException;
 
         MessageInProcessor(InetAddressAndPort peer, int messagingVersion)
@@ -308,7 +324,9 @@ public class MessageIn<T>
             this.messageConsumer = messageConsumer;
         }
 
-        // should ony be used for testing!!!
+        /**
+         * Only applicable in the non-blocking use case, and should ony be used for testing!!!
+         */
         @VisibleForTesting
         MessageHeader getMessageHeader()
         {
@@ -348,6 +366,9 @@ public class MessageIn<T>
         }
     }
 
+    /**
+     * Reads the incoming stream of bytes in the 4.0 format.
+     */
     static class MessageProcessorAsOf40 extends MessageInProcessor
     {
         MessageProcessorAsOf40(InetAddressAndPort peer, int messagingVersion)
@@ -364,7 +385,7 @@ public class MessageIn<T>
                 switch (state)
                 {
                     case READ_FIRST_CHUNK:
-                        if (in.readableBytes() < FIRST_SECTION_BYTE_COUNT)
+                        if (in.readableBytes() < MessageOut.MESSAGE_PREFIX_SIZE)
                             return;
                         MessageHeader header = readFirstChunk(inputPlus);
                         if (header == null)
@@ -463,6 +484,9 @@ public class MessageIn<T>
         }
     }
 
+    /**
+     * Reads the incoming stream of bytes in the pre-4.0 format.
+     */
     static class MessageProcessorPre40 extends MessageInProcessor
     {
         private static final int PARAMETERS_SIZE_LENGTH = Integer.BYTES;
@@ -482,7 +506,7 @@ public class MessageIn<T>
                 switch (state)
                 {
                     case READ_FIRST_CHUNK:
-                        if (in.readableBytes() < FIRST_SECTION_BYTE_COUNT)
+                        if (in.readableBytes() < MessageOut.MESSAGE_PREFIX_SIZE)
                             return;
                         MessageHeader header = readFirstChunk(inputPlus);
                         if (header == null)
@@ -621,7 +645,7 @@ public class MessageIn<T>
 
         public void process(RebufferingByteBufDataInputPlus in) throws IOException
         {
-            while (in.isOpen())
+            while (in.isOpen() && !in.isEmpty())
             {
                 MessageHeader header = readFirstChunk(in);
                 header.from = peer;
