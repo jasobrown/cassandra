@@ -21,7 +21,6 @@ package org.apache.cassandra.net.async;
 import java.io.IOException;
 import java.util.Queue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -375,7 +374,7 @@ abstract class ChannelWriter
     {
         private static final int DEFAULT_BUFFER_SIZE = 64 * 1024;
         private final BlockingQueue<Runnable> queue;
-        private final ExecutorService svc;
+        private final ThreadPoolExecutor svc;
         private final int messagingVersion;
         private final OutboundConnectionIdentifier connectionId;
 
@@ -388,7 +387,9 @@ abstract class ChannelWriter
             // explicitly set the queue's capacity to 1, to ensure we don't build up a backlog.
             // note: this still isn't quite what we want here, but getting there ....
             queue = new LinkedBlockingQueue<>(1);
-            this.svc = new ThreadPoolExecutor(1, 1, 10L, TimeUnit.SECONDS, queue, new NamedThreadFactory("LargeMessageWriter"));
+            String threadName = "MessagingService-NettyOutbound-" + connectionId.remote().toString() + "-LargeMessages";
+            svc = new ThreadPoolExecutor(1, 1, 5L, TimeUnit.SECONDS, queue, new NamedThreadFactory(threadName));
+            svc.allowCoreThreadTimeOut(true);
         }
 
         boolean requiresSerializerInPipeline()

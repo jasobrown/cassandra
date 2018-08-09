@@ -443,7 +443,7 @@ public class MessageIn<T>
 
         public void process(RebufferingByteBufDataInputPlus in) throws IOException
         {
-            while (in.isOpen())
+            while (in.isOpen() && !in.isEmpty())
             {
                 MessageHeader header = readFirstChunk(in);
                 header.from = peer;
@@ -648,7 +648,7 @@ public class MessageIn<T>
                 String key = DataInputStream.readUTF(in);
                 ParameterType parameterType = ParameterType.byName.get(key);
                 byte[] value = new byte[in.readInt()];
-                in.read(value);
+                in.readFully(value);
                 try (DataInputBuffer buffer = new DataInputBuffer(value))
                 {
                     parameters.put(parameterType, parameterType.serializer.deserialize(buffer, messagingVersion));
