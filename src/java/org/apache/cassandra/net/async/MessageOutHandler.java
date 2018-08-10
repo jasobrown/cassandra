@@ -149,7 +149,7 @@ class MessageOutHandler extends ChannelDuplexHandler
         }
         finally
         {
-            // Make sure we signal the outChanel even in case of errors.
+            // Make sure we signal the outChannel even in case of errors.
             channelWriter.onMessageProcessed(ctx);
         }
     }

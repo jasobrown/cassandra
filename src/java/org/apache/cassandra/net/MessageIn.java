@@ -244,9 +244,15 @@ public class MessageIn<T>
 
     public static MessageInProcessor getProcessor(InetAddressAndPort peer, int messagingVersion)
     {
+        return getProcessor(peer, messagingVersion, MessageInProcessor.MESSAGING_SERVICE_CONSUMER);
+
+    }
+
+    public static MessageInProcessor getProcessor(InetAddressAndPort peer, int messagingVersion, BiConsumer<MessageIn, Integer> messageConsumer)
+    {
         return messagingVersion >= MessagingService.VERSION_40
-               ? new MessageProcessorAsOf40(peer, messagingVersion)
-               : new MessageProcessorPre40(peer, messagingVersion);
+               ? new MessageInProcessorAsOf40(peer, messagingVersion, messageConsumer)
+               : new MessageInProcessorPre40(peer, messagingVersion, messageConsumer);
 
     }
 
@@ -312,11 +318,6 @@ public class MessageIn<T>
          */
         public abstract void process(RebufferingByteBufDataInputPlus in) throws IOException;
 
-        MessageInProcessor(InetAddressAndPort peer, int messagingVersion)
-        {
-            this(peer, messagingVersion, MESSAGING_SERVICE_CONSUMER);
-        }
-
         MessageInProcessor(InetAddressAndPort peer, int messagingVersion, BiConsumer<MessageIn, Integer> messageConsumer)
         {
             this.peer = peer;
@@ -369,11 +370,11 @@ public class MessageIn<T>
     /**
      * Reads the incoming stream of bytes in the 4.0 format.
      */
-    static class MessageProcessorAsOf40 extends MessageInProcessor
+    static class MessageInProcessorAsOf40 extends MessageInProcessor
     {
-        MessageProcessorAsOf40(InetAddressAndPort peer, int messagingVersion)
+        MessageInProcessorAsOf40(InetAddressAndPort peer, int messagingVersion, BiConsumer<MessageIn, Integer> messageConsumer)
         {
-            super(peer, messagingVersion);
+            super(peer, messagingVersion, messageConsumer);
         }
 
         @SuppressWarnings("resource")
@@ -487,15 +488,15 @@ public class MessageIn<T>
     /**
      * Reads the incoming stream of bytes in the pre-4.0 format.
      */
-    static class MessageProcessorPre40 extends MessageInProcessor
+    static class MessageInProcessorPre40 extends MessageInProcessor
     {
         private static final int PARAMETERS_SIZE_LENGTH = Integer.BYTES;
         private static final int PARAMETERS_VALUE_SIZE_LENGTH = Integer.BYTES;
         private static final int PAYLOAD_SIZE_LENGTH = Integer.BYTES;
 
-        MessageProcessorPre40(InetAddressAndPort peer, int messagingVersion)
+        MessageInProcessorPre40(InetAddressAndPort peer, int messagingVersion, BiConsumer<MessageIn, Integer> messageConsumer)
         {
-            super(peer, messagingVersion);
+            super(peer, messagingVersion, messageConsumer);
         }
 
         public void process(ByteBuf in) throws IOException

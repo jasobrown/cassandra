@@ -42,6 +42,7 @@ import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.PromiseCombiner;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.utils.CoalescingStrategies;
@@ -197,11 +198,7 @@ abstract class ChannelWriter
     {
         if ((checkWritability && (channel.isWritable()) || !channel.isOpen()) || !checkWritability)
         {
-            ChannelFuture channelFuture = write0(message);
-            if (channelFuture == null)
-                return false;
-
-            channelFuture.addListener(f -> handleMessageFuture(f, message, true));
+            write0(message).addListener(f -> handleMessageFuture(f, message, true));
             return true;
         }
         return false;
@@ -211,6 +208,8 @@ abstract class ChannelWriter
      * Handles the future of sending a particular message on this {@link ChannelWriter}.
      * <p>
      * Note: this is called from the netty event loop, so there is no race across multiple execution of this method.
+     * However, in {@link LargeMessageChannelWriter}, this method is called from the (single-threaded)
+     * {@link LargeMessageChannelWriter#svc}, but we are still protected from the race conditions.
      */
     @VisibleForTesting
     void handleMessageFuture(Future<? super Void> future, QueuedMessage msg, boolean allowReconnect)
@@ -365,7 +364,7 @@ abstract class ChannelWriter
      * in size, and, worse yet, then we would allocate one buffer per the message fan out.
      *
      * Here we serialize into a {@link ByteBufDataOutputStreamPlus}, which chunks the message into
-     * n {@link #DEFAULT_BUFFER_SIZE} allocations, and it also manages the amount of unacked data in the channel.
+     * n {@link #DEFAULT_BUFFER_SIZE} allocations, and it also manages the amount of unacknowledgeded data in the channel.
      * This saves us from allocating the one huge buffer as well as making sure we do not naively dump all the serialized
      * data into the channel, across multiple, smaller blocks.
      */
@@ -378,15 +377,14 @@ abstract class ChannelWriter
         private final int messagingVersion;
         private final OutboundConnectionIdentifier connectionId;
 
-        protected LargeMessageChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, int messagingVersion, OutboundConnectionIdentifier connectionId)
+        protected LargeMessageChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer,
+                                            int messagingVersion, OutboundConnectionIdentifier connectionId)
         {
             super(channel, messageResultConsumer);
             this.messagingVersion = messagingVersion;
             this.connectionId = connectionId;
 
-            // explicitly set the queue's capacity to 1, to ensure we don't build up a backlog.
-            // note: this still isn't quite what we want here, but getting there ....
-            queue = new LinkedBlockingQueue<>(1);
+            queue = new LinkedBlockingQueue<>();
             String threadName = "MessagingService-NettyOutbound-" + connectionId.remote().toString() + "-LargeMessages";
             svc = new ThreadPoolExecutor(1, 1, 5L, TimeUnit.SECONDS, queue, new NamedThreadFactory(threadName));
             svc.allowCoreThreadTimeOut(true);
@@ -402,12 +400,12 @@ abstract class ChannelWriter
         {
             pendingMessageCount.incrementAndGet();
             ChannelPromise aggregatePromise = channel.newPromise();
-            if (queue.offer(new LargeMessageWorkUnit(message, aggregatePromise)))
-                return aggregatePromise;
+            queue.offer(new LargeMessageWorkUnit(message, aggregatePromise));
 
-            // couldn't queue message
-            pendingMessageCount.decrementAndGet();
-            return null;
+            // TODO:JEB fix promise handling, as each sub-buffer that is sent to channel needs to have it's promise
+            // attached to the aggregate promise, *per message*
+
+            return aggregatePromise;
         }
 
         @Override
@@ -426,24 +424,30 @@ abstract class ChannelWriter
         {
             super.close();
             svc.shutdownNow();
+
+            // TODO:JEB move items out of backlog queue into OMC.backlog!
+            // not sure if that needs to happen before shutting down the threadSvc
         }
 
         private class LargeMessageWorkUnit implements Runnable
         {
             private final QueuedMessage currentMessage;
             private final ChannelPromise aggregatePromise;
+            private final PromiseCombiner promiseCombiner;
 
             private LargeMessageWorkUnit(QueuedMessage currentMessage, ChannelPromise aggregatePromise)
             {
                 this.currentMessage = currentMessage;
                 this.aggregatePromise = aggregatePromise;
+                promiseCombiner = new PromiseCombiner();
             }
 
             @Override
             public void run()
             {
-                // TODO:JEB this does not run firever (until close signal)
-                try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE, this::handleError, 30, TimeUnit.SECONDS))
+                try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE,
+                                                                                             this::handleError, 30, TimeUnit.SECONDS,
+                                                                                             this::handleBufferFuture))
                 {
                     while (!isClosed())
                     {
@@ -452,22 +456,38 @@ abstract class ChannelWriter
                         output.flush();
                         aggregatePromise.setSuccess();
                     }
+
+                    // aggregatePromise can only be added to the combiner after all the child promises have been added
+                    promiseCombiner.finish(aggregatePromise);
                 }
                 catch (Exception e)
                 {
-                    // TODO:JEB close the queue / channel ??
-                    aggregatePromise.setFailure(e);
+                    aggregatePromise.setFailure(new IOException(e));
+                }
+                finally
+                {
+                    pendingMessageCount.decrementAndGet();
                 }
             }
 
             /**
-             * Invoked when an error occurs trying to write to the channel
+             * Callback from {@link ByteBufDataOutputStreamPlus} when it sends a buffer to the netty channel.
+             *
+             * Note: called on the same thread as {@link #run()}.
+             */
+            void handleBufferFuture(Future promise)
+            {
+                promiseCombiner.add(promise);
+            }
+
+            /**
+             * Callback from {@link ByteBufDataOutputStreamPlus} when an error occurs trying to write to the channel.
+             *
+             * Note: called on the same thread as {@link #run()}.
              */
             void handleError(Throwable t)
             {
-                aggregatePromise.setFailure(t);
-
-                // TODO:JEB need to cancel the thread/task/conncetion/etc
+                aggregatePromise.setFailure(new IOException(t));
             }
         }
     }

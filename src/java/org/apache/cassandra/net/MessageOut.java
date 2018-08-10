@@ -205,7 +205,7 @@ public class MessageOut<T>
      */
     public void serialize(DataOutputPlus out, int messagingVersion, OutboundConnectionIdentifier destinationId, int id, long timestampNanos) throws IOException
     {
-        captureTracingInfo(messagingVersion, destinationId);
+        captureTracingInfo(destinationId);
 
         out.writeInt(MessagingService.PROTOCOL_MAGIC);
         out.writeInt(id);
@@ -220,7 +220,7 @@ public class MessageOut<T>
      * Record any tracing data, if enabled on this message.
      */
     @VisibleForTesting
-    void captureTracingInfo(int messagingVersion, OutboundConnectionIdentifier destinationId)
+    void captureTracingInfo(OutboundConnectionIdentifier destinationId)
     {
         try
         {
@@ -228,9 +228,7 @@ public class MessageOut<T>
             if (sessionId != null)
             {
                 TraceState state = Tracing.instance.get(sessionId);
-                String logMessage = String.format("Sending %s message to %s, size = %d bytes",
-                                                  verb, destinationId.connectionAddress(),
-                                                  serializedSize(messagingVersion) + MESSAGE_PREFIX_SIZE);
+                String logMessage = String.format("Sending %s message to %s", verb, destinationId.connectionAddress());
                 // session may have already finished; see CASSANDRA-5668
                 if (state == null)
                 {

@@ -64,13 +64,15 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
      * (after it was unwritable); hence, the use of a {@link Semaphore}.
      */
     private final Semaphore channelRateLimiter;
+    private final Consumer<Future> futureConsumer;
 
     /**
      * This *must* be the owning {@link ByteBuf} for the {@link BufferedDataOutputStreamPlus#buffer}
      */
     private ByteBuf currentBuf;
 
-    private ByteBufDataOutputStreamPlus(Channel channel, ByteBuf buffer, int bufferSize, Consumer<Throwable> errorHandler, int rateLimiterBlockTime, TimeUnit rateLimiterBlockTimeUnit)
+    private ByteBufDataOutputStreamPlus(Channel channel, ByteBuf buffer, int bufferSize, Consumer<Throwable> errorHandler,
+                                        int rateLimiterBlockTime, TimeUnit rateLimiterBlockTimeUnit, Consumer<Future> futureConsumer)
     {
         super(buffer.nioBuffer(0, bufferSize));
         this.channel = channel;
@@ -79,6 +81,7 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
         this.errorHandler = errorHandler;
         this.rateLimiterBlockTime = rateLimiterBlockTime;
         this.rateLimiterBlockTimeUnit = rateLimiterBlockTimeUnit;
+        this.futureConsumer = futureConsumer;
         channelRateLimiter = new Semaphore(channel.config().getWriteBufferHighWaterMark(), true);
     }
 
@@ -108,10 +111,17 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
         };
     }
 
-    public static ByteBufDataOutputStreamPlus create(Channel channel, int bufferSize, Consumer<Throwable> errorHandler, int rateLimiterBlockTime, TimeUnit timeUnit)
+    public static ByteBufDataOutputStreamPlus create(Channel channel, int bufferSize, Consumer<Throwable> errorHandler,
+                                                     int rateLimiterBlockTime, TimeUnit timeUnit)
+    {
+        return create(channel, bufferSize, errorHandler, rateLimiterBlockTime, timeUnit, future -> {});
+    }
+
+    public static ByteBufDataOutputStreamPlus create(Channel channel, int bufferSize, Consumer<Throwable> errorHandler,
+                                                     int rateLimiterBlockTime, TimeUnit timeUnit, Consumer<Future> futureConsumer)
     {
         ByteBuf buf = channel.alloc().directBuffer(bufferSize, bufferSize);
-        return new ByteBufDataOutputStreamPlus(channel, buf, bufferSize, errorHandler, rateLimiterBlockTime, timeUnit);
+        return new ByteBufDataOutputStreamPlus(channel, buf, bufferSize, errorHandler, rateLimiterBlockTime, timeUnit, futureConsumer);
     }
 
     /**
@@ -129,6 +139,7 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
         // the (possibly naive) assumption that we should always flush after each incoming buf
         ChannelFuture channelFuture = channel.writeAndFlush(buf);
         channelFuture.addListener(future -> handleBuffer(future, byteCount));
+        futureConsumer.accept(channelFuture);
         return channelFuture;
     }
 
@@ -172,12 +183,14 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
                 bytesTransferred += toRead;
                 final boolean shouldClose = (bytesTransferred == length); // this is the last buffer, can safely close channel
 
-                channel.writeAndFlush(fileRegion).addListener(future -> {
+                ChannelFuture channelFuture = channel.writeAndFlush(fileRegion);
+                channelFuture.addListener(future -> {
                     handleBuffer(future, toRead);
 
                     if ((shouldClose || !future.isSuccess()) && f.isOpen())
                         f.close();
                 });
+                futureConsumer.accept(channelFuture);
                 logger.trace("{} of {} (toRead {} cs {})", bytesTransferred, length, toRead, f.isOpen());
             }
 
@@ -204,7 +217,9 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
             if (!Uninterruptibles.tryAcquireUninterruptibly(channelRateLimiter, byteCount, rateLimiterBlockTime, rateLimiterBlockTimeUnit))
                 throw new IOException(String.format("outbound channel was not writable. Failed to acquire sufficient permits %d", byteCount));
 
-            channel.writeAndFlush(currentBuf).addListener(future -> handleBuffer(future, byteCount));
+            ChannelFuture channelFuture = channel.writeAndFlush(currentBuf);
+            channelFuture.addListener(future -> handleBuffer(future, byteCount));
+            futureConsumer.accept(channelFuture);
             currentBuf = channel.alloc().directBuffer(bufferSize, bufferSize);
             buffer = currentBuf.nioBuffer(0, bufferSize);
         }

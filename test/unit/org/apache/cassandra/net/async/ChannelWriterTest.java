@@ -19,7 +19,6 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -42,6 +41,7 @@ import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.async.ChannelWriter.CoalescingChannelWriter;
+import org.apache.cassandra.net.async.ChannelWriter.LargeMessageChannelWriter;
 import org.apache.cassandra.utils.CoalescingStrategies;
 import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
 
@@ -74,7 +74,12 @@ public class ChannelWriterTest
                                                                              InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.2"), 0));
         channel = new EmbeddedChannel();
         omc = new NonSendingOutboundMessagingConnection(id, null, Optional.empty());
-        channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty());
+        OutboundConnectionParams params = OutboundConnectionParams.builder()
+                                                                  .messageResultConsumer(omc::handleMessageResult)
+                                                                  .coalescingStrategy(Optional.empty())
+                                                                  .protocolVersion(MessagingService.current_version)
+                                                                  .build();
+        channelWriter = ChannelWriter.create(channel, params);
         channel.pipeline().addFirst(new MessageOutHandler(id, MessagingService.current_version, channelWriter, () -> null));
         coalescingStrategy = CoalescingStrategies.newCoalescingStrategy(CoalescingStrategies.Strategy.FIXED.name(), COALESCE_WINDOW_MS, null, "test");
     }
@@ -82,13 +87,39 @@ public class ChannelWriterTest
     @Test
     public void create_nonCoalescing()
     {
-        Assert.assertSame(ChannelWriter.SimpleChannelWriter.class, ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty()).getClass());
+        OutboundConnectionParams params = OutboundConnectionParams.builder()
+                                                                  .messageResultConsumer(omc::handleMessageResult)
+                                                                  .coalescingStrategy(Optional.empty())
+                                                                  .protocolVersion(MessagingService.current_version)
+                                                                  .build();
+
+        Assert.assertSame(ChannelWriter.SimpleChannelWriter.class, ChannelWriter.create(channel, params).getClass());
     }
 
     @Test
     public void create_Coalescing()
     {
-        Assert.assertSame(CoalescingChannelWriter.class, ChannelWriter.create(channel, omc::handleMessageResult, coalescingStrategy).getClass());
+        OutboundConnectionParams params = OutboundConnectionParams.builder()
+                                                                  .messageResultConsumer(omc::handleMessageResult)
+                                                                  .coalescingStrategy(coalescingStrategy)
+                                                                  .protocolVersion(MessagingService.current_version)
+                                                                  .build();
+        Assert.assertSame(CoalescingChannelWriter.class, ChannelWriter.create(channel, params).getClass());
+    }
+
+    @Test
+    public void create_LargeMessage()
+    {
+        OutboundConnectionIdentifier largeConnId = OutboundConnectionIdentifier.large(InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.1"), 0),
+                                                                                      InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.2"), 0));
+
+        OutboundConnectionParams params = OutboundConnectionParams.builder()
+                                                                  .messageResultConsumer(omc::handleMessageResult)
+                                                                  .coalescingStrategy(Optional.empty())
+                                                                  .protocolVersion(MessagingService.current_version)
+                                                                  .connectionId(largeConnId)
+                                                                  .build();
+        Assert.assertSame(LargeMessageChannelWriter.class, ChannelWriter.create(channel, params).getClass());
     }
 
     @Test
