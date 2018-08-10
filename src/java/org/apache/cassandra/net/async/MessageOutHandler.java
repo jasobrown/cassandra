@@ -124,7 +124,10 @@ class MessageOutHandler extends ChannelDuplexHandler
             }
 
             out = ctx.alloc().ioBuffer((int)currentFrameSize);
-            msg.message.serialize(new ByteBufDataOutputPlus(out), targetMessagingVersion, connectionId, msg.id, msg.timestampNanos);
+
+            @SuppressWarnings("resource")
+            ByteBufDataOutputPlus outputPlus = new ByteBufDataOutputPlus(out);
+            msg.message.serialize(outputPlus, targetMessagingVersion, connectionId, msg.id, msg.timestampNanos);
 
             // next few lines are for debugging ... massively helpful!!
             // if we allocated too much buffer for this message, we'll log here.
