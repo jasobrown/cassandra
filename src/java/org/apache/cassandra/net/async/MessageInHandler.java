@@ -67,7 +67,7 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
     // TODO:JEB reevaluate the error handling once I switch from ByteToMessageDecoder to ChannelInboundHandlerAdapter
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
     {
-\        if (cause instanceof EOFException)
+        if (cause instanceof EOFException)
             logger.trace("eof reading from socket; closing", cause);
         else if (cause instanceof UnknownTableException)
             logger.warn("Got message from unknown table while reading from socket; closing", cause);
