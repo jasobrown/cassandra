@@ -375,6 +375,7 @@ public class MessageIn<T>
         MessageInProcessorAsOf40(InetAddressAndPort peer, int messagingVersion, BiConsumer<MessageIn, Integer> messageConsumer)
         {
             super(peer, messagingVersion, messageConsumer);
+            assert messagingVersion >= MessagingService.VERSION_40;
         }
 
         @SuppressWarnings("resource")
@@ -492,6 +493,7 @@ public class MessageIn<T>
         MessageInProcessorPre40(InetAddressAndPort peer, int messagingVersion, BiConsumer<MessageIn, Integer> messageConsumer)
         {
             super(peer, messagingVersion, messageConsumer);
+            assert messagingVersion < MessagingService.VERSION_40;
         }
 
         public void process(ByteBuf in) throws IOException

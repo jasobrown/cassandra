@@ -60,6 +60,7 @@ public class ChannelWriterTest
     private ChannelWriter channelWriter;
     private NonSendingOutboundMessagingConnection omc;
     private Optional<CoalescingStrategy> coalescingStrategy;
+    private OutboundConnectionIdentifier id;
 
     @BeforeClass
     public static void before()
@@ -70,7 +71,7 @@ public class ChannelWriterTest
     @Before
     public void setup()
     {
-        OutboundConnectionIdentifier id = OutboundConnectionIdentifier.small(InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.1"), 0),
+        id = OutboundConnectionIdentifier.small(InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.1"), 0),
                                                                              InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.2"), 0));
         channel = new EmbeddedChannel();
         omc = new NonSendingOutboundMessagingConnection(id, null, Optional.empty());
@@ -92,6 +93,7 @@ public class ChannelWriterTest
                                                                   .messageResultConsumer(omc::handleMessageResult)
                                                                   .coalescingStrategy(Optional.empty())
                                                                   .protocolVersion(MessagingService.current_version)
+                                                                  .connectionId(id)
                                                                   .build();
 
         Assert.assertSame(ChannelWriter.SimpleChannelWriter.class, ChannelWriter.create(channel, params).getClass());
@@ -104,6 +106,7 @@ public class ChannelWriterTest
                                                                   .messageResultConsumer(omc::handleMessageResult)
                                                                   .coalescingStrategy(coalescingStrategy)
                                                                   .protocolVersion(MessagingService.current_version)
+                                                                  .connectionId(id)
                                                                   .build();
         Assert.assertSame(CoalescingChannelWriter.class, ChannelWriter.create(channel, params).getClass());
     }
