@@ -90,6 +90,7 @@ public class OutboundMessagingConnectionTest
                                          .messageResultConsumer(omc::handleMessageResult)
                                          .coalescingStrategy(Optional.empty())
                                          .protocolVersion(MessagingService.current_version)
+                                         .connectionId(connectionId)
                                          .build();
         omc.setChannelWriter(ChannelWriter.create(channel, params));
 

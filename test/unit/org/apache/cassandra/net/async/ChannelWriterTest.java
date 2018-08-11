@@ -78,6 +78,7 @@ public class ChannelWriterTest
                                                                   .messageResultConsumer(omc::handleMessageResult)
                                                                   .coalescingStrategy(Optional.empty())
                                                                   .protocolVersion(MessagingService.current_version)
+                                                                  .connectionId(id)
                                                                   .build();
         channelWriter = ChannelWriter.create(channel, params);
         channel.pipeline().addFirst(new MessageOutHandler(id, MessagingService.current_version, channelWriter, () -> null));
