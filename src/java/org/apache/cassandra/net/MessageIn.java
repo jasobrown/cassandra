@@ -271,7 +271,7 @@ public class MessageIn<T>
          */
         enum State
         {
-            READ_FIRST_CHUNK,
+            READ_PREFIX,
             READ_IP_ADDRESS,
             READ_VERB,
             READ_PARAMETERS_SIZE,
@@ -299,7 +299,7 @@ public class MessageIn<T>
         /**
          * Captures the current {@link State} of processing a message. Primarily useful in the non-blocking use case.
          */
-        State state;
+        State state = State.READ_PREFIX;
 
         /**
          * Captures the current data we've parsed out of in incoming message. Primarily useful in the non-blocking use case.
@@ -355,7 +355,7 @@ public class MessageIn<T>
             int parameterLength;
         }
 
-        MessageHeader readFirstChunk(DataInputPlus in) throws IOException
+        MessageHeader readPrefix(DataInputPlus in) throws IOException
         {
             MessagingService.validateMagic(in.readInt());
             MessageHeader messageHeader = new MessageHeader();
@@ -385,10 +385,10 @@ public class MessageIn<T>
             {
                 switch (state)
                 {
-                    case READ_FIRST_CHUNK:
+                    case READ_PREFIX:
                         if (in.readableBytes() < MessageOut.MESSAGE_PREFIX_SIZE)
                             return;
-                        MessageHeader header = readFirstChunk(inputPlus);
+                        MessageHeader header = readPrefix(inputPlus);
                         if (header == null)
                             return;
                         header.from = peer;
@@ -436,7 +436,7 @@ public class MessageIn<T>
                         if (messageIn != null)
                             messageConsumer.accept(messageIn, messageHeader.messageId);
 
-                        state = State.READ_FIRST_CHUNK;
+                        state = State.READ_PREFIX;
                         messageHeader = null;
                         break;
                     default:
@@ -451,15 +451,10 @@ public class MessageIn<T>
 
             while (inputTracker.getBytesRead() < parameterLength)
             {
-                String key = DataInputStream.readUTF(inputPlus);
+                String key = DataInputStream.readUTF(inputTracker);
                 ParameterType parameterType = ParameterType.byName.get(key);
                 long valueLength = VIntCoding.readUnsignedVInt(inputTracker);
-                byte[] value = new byte[Ints.checkedCast(valueLength)];
-                inputTracker.readFully(value);
-                try (DataInputBuffer buffer = new DataInputBuffer(value))
-                {
-                    parameters.put(parameterType, parameterType.serializer.deserialize(buffer, messagingVersion));
-                }
+                parameters.put(parameterType, parameterType.serializer.deserialize(inputTracker, messagingVersion));
             }
         }
 
@@ -467,8 +462,8 @@ public class MessageIn<T>
         {
             while (in.isOpen() && !in.isEmpty())
             {
-                MessageHeader header = readFirstChunk(in);
-                header.from = peer;
+                messageHeader = readPrefix(in);
+                messageHeader.from = peer;
                 messageHeader.verb = MessagingService.Verb.fromId(in.readInt());
                 messageHeader.parameterLength = Ints.checkedCast(VIntCoding.readUnsignedVInt(in));
                 messageHeader.parameters = messageHeader.parameterLength == 0 ? Collections.emptyMap() : new EnumMap<>(ParameterType.class);
@@ -506,10 +501,10 @@ public class MessageIn<T>
             {
                 switch (state)
                 {
-                    case READ_FIRST_CHUNK:
+                    case READ_PREFIX:
                         if (in.readableBytes() < MessageOut.MESSAGE_PREFIX_SIZE)
                             return;
-                        MessageHeader header = readFirstChunk(inputPlus);
+                        MessageHeader header = readPrefix(inputPlus);
                         if (header == null)
                             return;
                         messageHeader = header;
@@ -563,7 +558,7 @@ public class MessageIn<T>
                         if (messageIn != null)
                             messageConsumer.accept(messageIn, messageHeader.messageId);
 
-                        state = State.READ_FIRST_CHUNK;
+                        state = State.READ_PREFIX;
                         messageHeader = null;
                         break;
                     default:
@@ -648,8 +643,8 @@ public class MessageIn<T>
         {
             while (in.isOpen() && !in.isEmpty())
             {
-                MessageHeader header = readFirstChunk(in);
-                header.from = peer;
+                messageHeader = readPrefix(in);
+                messageHeader.from = CompactEndpointSerializationHelper.instance.deserialize(in, messagingVersion);
                 messageHeader.verb = MessagingService.Verb.fromId(in.readInt());
                 messageHeader.parameterLength = in.readInt();
                 messageHeader.parameters = messageHeader.parameterLength == 0 ? Collections.emptyMap() : new EnumMap<>(ParameterType.class);
@@ -672,12 +667,8 @@ public class MessageIn<T>
             {
                 String key = DataInputStream.readUTF(in);
                 ParameterType parameterType = ParameterType.byName.get(key);
-                byte[] value = new byte[in.readInt()];
-                in.readFully(value);
-                try (DataInputBuffer buffer = new DataInputBuffer(value))
-                {
-                    parameters.put(parameterType, parameterType.serializer.deserialize(buffer, messagingVersion));
-                }
+                int valueLength = in.readInt();
+                parameters.put(parameterType, parameterType.serializer.deserialize(in, messagingVersion));
             }
         }
     }

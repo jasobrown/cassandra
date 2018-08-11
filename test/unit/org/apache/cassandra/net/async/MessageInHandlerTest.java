@@ -20,10 +20,14 @@ package org.apache.cassandra.net.async;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 import com.google.common.collect.ImmutableList;
@@ -33,6 +37,9 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -49,11 +56,15 @@ import org.apache.cassandra.utils.UUIDGen;
 
 import static org.apache.cassandra.net.async.OutboundConnectionIdentifier.ConnectionType.SMALL_MESSAGE;
 
+@RunWith(Parameterized.class)
 public class MessageInHandlerTest
 {
     private static final int MSG_ID = 42;
     private static InetAddressAndPort addr;
-    private static final int messagingVersion = MessagingService.current_version;
+
+    private final int messagingVersion;
+    private final OutboundConnectionIdentifier connectionId;
+    private final boolean handlesLargeMessages;
 
     private ByteBuf buf;
 
@@ -71,11 +82,31 @@ public class MessageInHandlerTest
             buf.release();
     }
 
-    private MessageInHandler getHandler(InetAddressAndPort addr, int messagingVersion, BiConsumer<MessageIn, Integer> messageConsumer)
+    public MessageInHandlerTest(int messagingVersion, boolean handlesLargeMessages)
     {
-        return new MessageInHandler(addr, MessageIn.getProcessor(addr, messagingVersion, messageConsumer), false);
+        this.messagingVersion = messagingVersion;
+        this.handlesLargeMessages = handlesLargeMessages;
+
+        connectionId = handlesLargeMessages
+                       ? OutboundConnectionIdentifier.large(addr, addr)
+                       : OutboundConnectionIdentifier.small(addr, addr);
     }
 
+    @Parameters()
+    public static Collection<Object[]> generateData()
+    {
+        return Arrays.asList(new Object[][]{
+            { MessagingService.VERSION_30, false },
+            { MessagingService.VERSION_30, true },
+            { MessagingService.VERSION_40, false },
+            { MessagingService.VERSION_40, true },
+        });
+    }
+
+        private MessageInHandler getHandler(InetAddressAndPort addr, BiConsumer<MessageIn, Integer> messageConsumer)
+    {
+        return new MessageInHandler(addr, MessageIn.getProcessor(addr, messagingVersion, messageConsumer), handlesLargeMessages);
+    }
 
     @Test
     public void channelRead_HappyPath_NoParameters() throws Exception
@@ -107,9 +138,12 @@ public class MessageInHandlerTest
         serialize(msgOut);
 
         MessageInWrapper wrapper = new MessageInWrapper();
-        MessageInHandler handler = getHandler(addr, messagingVersion, wrapper.messageConsumer);
-        handler.channelRead(null, buf);
+        MessageInHandler handler = getHandler(addr, wrapper.messageConsumer);
+        EmbeddedChannel channel = new EmbeddedChannel(handler);
+        channel.writeInbound(buf);
 
+        // need to wait until async tasks are complete, as large messages spin up a background thread
+        Assert.assertTrue(wrapper.latch.await(5, TimeUnit.SECONDS));
         Assert.assertNotNull(wrapper.messageIn);
         Assert.assertEquals(MSG_ID, wrapper.id);
         Assert.assertEquals(msgOut.from, wrapper.messageIn.from);
@@ -121,17 +155,14 @@ public class MessageInHandlerTest
     private void serialize(MessageOut msgOut) throws IOException
     {
         buf = Unpooled.buffer(1024, 1024); // 1k should be enough for everybody!
-        buf.writeInt(MessagingService.PROTOCOL_MAGIC);
-        buf.writeInt(MSG_ID); // this is the id
-        buf.writeInt((int) NanoTimeToCurrentTimeMillis.convert(System.nanoTime()));
-
-        msgOut.serialize(new ByteBufDataOutputPlus(buf), messagingVersion);
+        int timestamp = (int) NanoTimeToCurrentTimeMillis.convert(System.nanoTime());
+        msgOut.serialize(new ByteBufDataOutputPlus(buf), messagingVersion, connectionId, MSG_ID, timestamp);
     }
 
     @Test
     public void exceptionHandled()
     {
-        MessageInHandler handler = getHandler(addr, messagingVersion, null);
+        MessageInHandler handler = getHandler(addr, null);
         EmbeddedChannel channel = new EmbeddedChannel(handler);
         Assert.assertTrue(channel.isOpen());
         handler.exceptionCaught(channel.pipeline().firstContext(), new EOFException());
@@ -140,6 +171,7 @@ public class MessageInHandlerTest
 
     private static class MessageInWrapper
     {
+        final CountDownLatch latch = new CountDownLatch(1);
         MessageIn messageIn;
         int id;
 
@@ -147,6 +179,7 @@ public class MessageInHandlerTest
         {
             this.messageIn = messageIn;
             this.id = integer;
+            latch.countDown();
         };
     }
 }

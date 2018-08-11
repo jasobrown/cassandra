@@ -43,30 +43,18 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
     public static final Logger logger = LoggerFactory.getLogger(MessageInHandler.class);
 
     private final InetAddressAndPort peer;
-    private final MessageInProcessor messageProcessor;
-    private final boolean handlesLargeMessages;
 
-    private BufferHandler bufferHandler;
+    private final BufferHandler bufferHandler;
     private volatile boolean closed;
 
     public MessageInHandler(InetAddressAndPort peer, MessageInProcessor messageProcessor, boolean handlesLargeMessages)
     {
         this.peer = peer;
-        this.messageProcessor = messageProcessor;
-        this.handlesLargeMessages = handlesLargeMessages;
+
+        bufferHandler = handlesLargeMessages
+                        ? new BlockingBufferHandler(messageProcessor)
+                        : new NonblockingBufferHandler(messageProcessor);
     }
-
-    @Override
-    public void channelActive(ChannelHandlerContext ctx)
-    {
-        if (handlesLargeMessages)
-            bufferHandler = new BlockingBufferHandler(ctx, messageProcessor);
-        else
-            bufferHandler = new NonblockingBufferHandler(messageProcessor);
-
-        ctx.fireChannelActive();
-    }
-
 
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws IOException
     {
@@ -79,7 +67,7 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
     // TODO:JEB reevaluate the error handling once I switch from ByteToMessageDecoder to ChannelInboundHandlerAdapter
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
     {
-        if (cause instanceof EOFException)
+\        if (cause instanceof EOFException)
             logger.trace("eof reading from socket; closing", cause);
         else if (cause instanceof UnknownTableException)
             logger.warn("Got message from unknown table while reading from socket; closing", cause);
@@ -170,8 +158,11 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
 
         public void close()
         {
-            retainedInlineBuffer.release();
-            retainedInlineBuffer = null;
+            if (retainedInlineBuffer != null)
+            {
+                retainedInlineBuffer.release();
+                retainedInlineBuffer = null;
+            }
         }
     }
 
@@ -195,11 +186,6 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
          */
         private static final int QUEUE_HIGH_WATER_MARK = 1 << 16;
 
-        /**
-         * A queue in which to stash incoming {@link ByteBuf}s.
-         */
-        private final RebufferingByteBufDataInputPlus queuedBuffers;
-
         private final MessageInProcessor messageProcessor;
 
         /**
@@ -208,13 +194,15 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
          */
         private final ThreadPoolExecutor executorService;
 
+        /**
+         * A queue in which to stash incoming {@link ByteBuf}s.
+         */
+        private RebufferingByteBufDataInputPlus queuedBuffers;
+
         private volatile boolean executing;
 
-        BlockingBufferHandler(ChannelHandlerContext ctx, MessageInProcessor messageProcessor)
+        BlockingBufferHandler(MessageInProcessor messageProcessor)
         {
-            queuedBuffers = new RebufferingByteBufDataInputPlus(QUEUE_LOW_WATER_MARK,
-                                                                QUEUE_HIGH_WATER_MARK,
-                                                                ctx.channel().config());
             this.messageProcessor = messageProcessor;
 
             String threadName = "MessagingService-NettyInbound-" + peer.toString() + "-LargeMessages";
@@ -231,6 +219,13 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
 
         public void channelRead(ChannelHandlerContext ctx, ByteBuf in)
         {
+            if (queuedBuffers == null)
+            {
+                queuedBuffers = new RebufferingByteBufDataInputPlus(QUEUE_LOW_WATER_MARK,
+                                                                    QUEUE_HIGH_WATER_MARK,
+                                                                    ctx.channel().config());
+            }
+
             queuedBuffers.append(in);
 
             // if we are racing with processInBackground(), go ahead and add another task to the queue
@@ -261,6 +256,8 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
             {
                 // TODO:JEB is this the correct error handling, especially off the event loop?
                 exceptionCaught(ctx, cause);
+                queuedBuffers.close();
+                // TODO:JEB CHANNEL needs to die here! & queuedBuffers, cuz we're in a spot place in the stream
             }
             finally
             {

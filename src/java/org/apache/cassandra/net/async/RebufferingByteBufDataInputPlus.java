@@ -185,7 +185,7 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
 
     public boolean isEmpty() throws EOFException
     {
-        return available() > 0;
+        return available() == 0;
     }
 
     @Override

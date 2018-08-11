@@ -89,7 +89,7 @@ public class MessageInProcessorTest
         buf.writerIndex(len);
 
         MessageIn.MessageInProcessor processor = MessageIn.getProcessor(addr, messagingVersion, (messageIn, integer) -> {});
-        processor.readFirstChunk(new ByteBufDataInputPlus(buf));
+        processor.readPrefix(new ByteBufDataInputPlus(buf));
     }
 
     @Test
