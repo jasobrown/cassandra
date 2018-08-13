@@ -105,11 +105,7 @@ public class MessageOutBench
     {
         buf.resetReaderIndex();
         buf.resetWriterIndex();
-        buf.writeInt(MessagingService.PROTOCOL_MAGIC);
-        buf.writeInt(42); // this is the id
-        buf.writeInt((int) NanoTimeToCurrentTimeMillis.convert(System.nanoTime()));
-
-        msgOut.serialize(new ByteBufDataOutputPlus(buf), messagingVersion);
+        msgOut.serialize(new ByteBufDataOutputPlus(buf), messagingVersion, null, 42, System.nanoTime());
         handler.channelRead(null, buf);
         return msgOut.serializedSize(messagingVersion);
     }

@@ -144,7 +144,7 @@ public class InboundHandshakeHandlerTest
                                                                 true,
                                                                 false);
 
-        buf.writeInt(MessagingService.PROTOCOL_MAGIC << 2);
+        buf.writeInt(MessagingService.PROTOCOL_MAGIC - 1);
         buf.writeInt(first.encodeFlags());
         handler.handleStart(channel.pipeline().firstContext(), buf);
     }
