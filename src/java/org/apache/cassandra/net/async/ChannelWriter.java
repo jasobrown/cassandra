@@ -371,22 +371,20 @@ abstract class ChannelWriter
     @VisibleForTesting
     static class LargeMessageChannelWriter extends ChannelWriter
     {
-        private static final int DEFAULT_BUFFER_SIZE = 64 * 1024;
-        private final BlockingQueue<Runnable> queue;
+        private static final int DEFAULT_BUFFER_SIZE = 16 * 1024;
         private final ThreadPoolExecutor svc;
         private final int messagingVersion;
         private final OutboundConnectionIdentifier connectionId;
 
-        protected LargeMessageChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer,
-                                            int messagingVersion, OutboundConnectionIdentifier connectionId)
+        LargeMessageChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer,
+                                  int messagingVersion, OutboundConnectionIdentifier connectionId)
         {
             super(channel, messageResultConsumer);
             this.messagingVersion = messagingVersion;
             this.connectionId = connectionId;
 
-            queue = new LinkedBlockingQueue<>();
             String threadName = "MessagingService-NettyOutbound-" + connectionId.remote().toString() + "-LargeMessages";
-            svc = new ThreadPoolExecutor(1, 1, 5L, TimeUnit.SECONDS, queue, new NamedThreadFactory(threadName));
+            svc = new ThreadPoolExecutor(1, 1, 5L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), new NamedThreadFactory(threadName));
             svc.allowCoreThreadTimeOut(true);
         }
 
@@ -400,10 +398,7 @@ abstract class ChannelWriter
         {
             pendingMessageCount.incrementAndGet();
             ChannelPromise aggregatePromise = channel.newPromise();
-            queue.offer(new LargeMessageWorkUnit(message, aggregatePromise));
-
-            // TODO:JEB fix promise handling, as each sub-buffer that is sent to channel needs to have it's promise
-            // attached to the aggregate promise, *per message*
+            svc.submit(new LargeMessageWriteTask(message, aggregatePromise));
 
             return aggregatePromise;
         }
@@ -424,18 +419,15 @@ abstract class ChannelWriter
         {
             super.close();
             svc.shutdownNow();
-
-            // TODO:JEB move items out of backlog queue into OMC.backlog!
-            // not sure if that needs to happen before shutting down the threadSvc
         }
 
-        private class LargeMessageWorkUnit implements Runnable
+        private class LargeMessageWriteTask implements Runnable
         {
             private final QueuedMessage currentMessage;
             private final ChannelPromise aggregatePromise;
             private final PromiseCombiner promiseCombiner;
 
-            private LargeMessageWorkUnit(QueuedMessage currentMessage, ChannelPromise aggregatePromise)
+            private LargeMessageWriteTask(QueuedMessage currentMessage, ChannelPromise aggregatePromise)
             {
                 this.currentMessage = currentMessage;
                 this.aggregatePromise = aggregatePromise;
@@ -449,13 +441,8 @@ abstract class ChannelWriter
                                                                                              this::handleError, 30, TimeUnit.SECONDS,
                                                                                              this::handleBufferFuture))
                 {
-                    while (!isClosed())
-                    {
-                        currentMessage.message.serialize(output, messagingVersion, connectionId, currentMessage.id, currentMessage.timestampNanos);
-                        pendingMessageCount.decrementAndGet();
-                        output.flush();
-                        aggregatePromise.setSuccess();
-                    }
+                    currentMessage.message.serialize(output, messagingVersion, connectionId, currentMessage.id, currentMessage.timestampNanos);
+                    output.flush();
 
                     // aggregatePromise can only be added to the combiner after all the child promises have been added
                     promiseCombiner.finish(aggregatePromise);

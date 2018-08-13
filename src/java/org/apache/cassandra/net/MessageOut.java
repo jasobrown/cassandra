@@ -48,7 +48,6 @@ import org.apache.cassandra.utils.vint.VIntCoding;
 import static org.apache.cassandra.tracing.Tracing.isTracing;
 
 /**
- * // TODO:JEB update me
  * Each message contains a header with several fixed fields, an optional key-value parameters section, and then
  * the message payload itself. Below is a visualization of the layout.
  *

@@ -91,35 +91,4 @@ public class MessageInProcessorTest
         MessageIn.MessageInProcessor processor = MessageIn.getProcessor(addr, messagingVersion, (messageIn, integer) -> {});
         processor.readPrefix(new ByteBufDataInputPlus(buf));
     }
-
-    @Test
-    public void readParameters_WithHalfReceivedParameters() throws Exception
-    {
-//        MessageOut msgOut = new MessageOut<>(addr, MessagingService.Verb.ECHO, null, null, ImmutableList.of(), SMALL_MESSAGE);
-//        UUID uuid = UUIDGen.getTimeUUID();
-//        msgOut = msgOut.withParameter(ParameterType.TRACE_SESSION, uuid);
-//
-//        serialize(msgOut);
-//
-//        // move the write index pointer back a few bytes to simulate like the full bytes are not present.
-//        // yeah, it's lame, but it tests the basics of what is happening during the deserialiization
-//        int originalWriterIndex = buf.writerIndex();
-//        buf.writerIndex(originalWriterIndex - 6);
-//
-//        MessageInHandlerTest.MessageInWrapper wrapper = new MessageInHandlerTest.MessageInWrapper();
-//        MessageInHandler handler = getHandler(addr, messagingVersion, wrapper.messageConsumer);
-//        handler.channelRead(null, buf);
-//
-//        Assert.assertNull(wrapper.messageIn);
-//
-//        MessageIn.MessageHeader header = handler.getMessageHeader();
-//        Assert.assertEquals(MSG_ID, header.messageId);
-//        Assert.assertEquals(msgOut.verb, header.verb);
-//        Assert.assertEquals(msgOut.from, header.from);
-//
-//        // now, set the writer index back to the original value to pretend that we actually got more bytes in
-//        buf.writerIndex(originalWriterIndex);
-//        handler.channelRead(null, buf);
-//        Assert.assertNotNull(wrapper.messageIn);
-    }
 }
