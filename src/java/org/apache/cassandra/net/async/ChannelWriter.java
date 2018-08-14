@@ -19,8 +19,9 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Queue;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -42,7 +43,6 @@ import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.PromiseCombiner;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.utils.CoalescingStrategies;
@@ -396,10 +396,10 @@ abstract class ChannelWriter
         protected ChannelFuture write0(QueuedMessage message)
         {
             pendingMessageCount.incrementAndGet();
-            ChannelPromise aggregatePromise = channel.newPromise();
-            svc.submit(new LargeMessageWriteTask(message, aggregatePromise));
+            ChannelPromise promise = channel.newPromise();
+            svc.submit(new LargeMessageWriteTask(message, promise));
 
-            return aggregatePromise;
+            return promise;
         }
 
         @Override
@@ -423,32 +423,46 @@ abstract class ChannelWriter
         private class LargeMessageWriteTask implements Runnable
         {
             private final QueuedMessage currentMessage;
-            private final ChannelPromise aggregatePromise;
-            private final PromiseCombiner promiseCombiner;
+
+            private final ChannelPromise promise;
+
+            // a poor-man's thread-safe version of netty's PromiseCombiner.
+            private final List<Future> promises;
 
             private LargeMessageWriteTask(QueuedMessage currentMessage, ChannelPromise aggregatePromise)
             {
                 this.currentMessage = currentMessage;
-                this.aggregatePromise = aggregatePromise;
-                promiseCombiner = new PromiseCombiner();
+                this.promise = aggregatePromise;
+                promises = new LinkedList<>();
             }
 
             @Override
             public void run()
             {
                 try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE,
-                                                                                             this::handleError, 30, TimeUnit.SECONDS,
-                                                                                             this::handleBufferFuture))
+                                                                                             this::handleError, 30, TimeUnit.SECONDS, this::handleFuture))
                 {
                     currentMessage.message.serialize(output, messagingVersion, connectionId, currentMessage.id, currentMessage.timestampNanos);
                     output.flush();
 
-                    // aggregatePromise can only be added to the combiner after all the child promises have been added
-                    promiseCombiner.finish(aggregatePromise);
+                    // need to wait until *all* promises are created & return successfully before we can declare success on this message.
+                    for (Future<?> future : promises)
+                    {
+                        // optimize for the success path
+                        if (future.isSuccess())
+                            continue;
+
+                        if (!future.awaitUninterruptibly(30, TimeUnit.SECONDS))
+                            throw new IOException("future failed to fulfilled within the time limit");
+
+                        if (!future.isSuccess())
+                            throw future.cause();
+                    }
+                    promise.trySuccess();
                 }
-                catch (Exception e)
+                catch (Throwable t)
                 {
-                    aggregatePromise.setFailure(new IOException(e));
+                    promise.tryFailure(new IOException(t));
                 }
                 finally
                 {
@@ -461,19 +475,23 @@ abstract class ChannelWriter
              *
              * Note: called on the same thread as {@link #run()}.
              */
-            void handleBufferFuture(Future promise)
+            void handleFuture(Future promise)
             {
-                promiseCombiner.add(promise);
+                promises.add(promise);
             }
 
             /**
-             * Callback from {@link ByteBufDataOutputStreamPlus} when an error occurs trying to write to the channel.
+             * Callback from {@link ByteBufDataOutputStreamPlus} when an error occurs trying to writing *within* the pipeline.
+             * Think of this method as an express mechanism to know when the pipeline fails, such that we don't need
+             * to have {@link #run()} wait for all the futures to be created (they might never be created).
              *
-             * Note: called on the same thread as {@link #run()}.
+             * Note: invoked on the netty event loop.
              */
             void handleError(Throwable t)
             {
-                aggregatePromise.setFailure(new IOException(t));
+                // failing the promise here will eventually lead back to OMC.handleMessageResult, which closes the channel,
+                // and closes this ChannelWriter eventually, as well.
+                promise.tryFailure(t);
             }
         }
     }

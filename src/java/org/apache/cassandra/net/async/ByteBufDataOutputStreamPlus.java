@@ -64,6 +64,8 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
      * (after it was unwritable); hence, the use of a {@link Semaphore}.
      */
     private final Semaphore channelRateLimiter;
+
+    // TODO:JEB rename me and document me
     private final Consumer<Future> futureConsumer;
 
     /**
@@ -233,7 +235,10 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
     private void handleBuffer(Future<? super Void> future, int bytesWritten)
     {
         channelRateLimiter.release(bytesWritten);
-        logger.trace("bytesWritten {} {} because {}", bytesWritten, (future.isSuccess() == true) ? "Succeeded" : "Failed", future.cause());
+
+        if (logger.isTraceEnabled())
+            logger.trace("bytesWritten {} {} because {}", bytesWritten, future.isSuccess() ? "Succeeded" : "Failed", future.cause());
+
         if (!future.isSuccess() && channel.isOpen())
             errorHandler.accept(future.cause());
     }
@@ -255,9 +260,13 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
     public void close() throws IOException
     {
         doFlush(0);
-        if (currentBuf.refCnt() > 0)
-            currentBuf.release();
-        currentBuf = null;
-        buffer = null;
+
+        if (currentBuf != null)
+        {
+            if (currentBuf.refCnt() > 0)
+                currentBuf.release();
+            currentBuf = null;
+            buffer = null;
+        }
     }
 }
