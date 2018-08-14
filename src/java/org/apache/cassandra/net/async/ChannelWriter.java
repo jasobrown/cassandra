@@ -248,8 +248,7 @@ abstract class ChannelWriter
             if (msg == null)
                 break;
 
-            pendingMessageCount.incrementAndGet();
-            ChannelFuture future = channel.write(msg);
+            ChannelFuture future = write0(msg);
             future.addListener(f -> handleMessageFuture(f, msg, allowReconnect));
             count++;
         }
