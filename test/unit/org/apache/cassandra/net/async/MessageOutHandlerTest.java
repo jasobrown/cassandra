@@ -20,7 +20,6 @@ package org.apache.cassandra.net.async;
 
 import java.io.IOException;
 import java.util.HashMap;
-import java.util.Optional;
 import java.util.UUID;
 
 import org.junit.Assert;

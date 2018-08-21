@@ -209,6 +209,45 @@ public class OutboundMessagingConnection
         return true;
     }
 
+    /*
+
+        - connect on init(), or in ctor, then we always have
+        - or is it just the QueuePollerTask i need, which then encapsulates all the channel(s) and state about channel
+        -- QueuePoller ***MUST*** run in same event loop else all is lost <weep>
+
+
+
+
+
+     */
+
+
+
+
+
+
+    class QueuePollerTask implements Runnable
+    {
+        @Override
+        public void run()
+        {
+            QueuedMessage next = backlog.peek();
+            if (next != null)
+            {
+                // we're on the event loop here, maybe do the expiration check in this method??
+
+                if(channelWriter.write(next, true))
+                    backlog.remove();
+            }
+        }
+    }
+
+
+
+
+
+
+
     /**
      * Initiate all the actions required to establish a working, valid connection. This includes
      * opening the socket, negotiating the internode messaging handshake, and setting up the working

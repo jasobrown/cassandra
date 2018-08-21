@@ -18,9 +18,6 @@
 
 package org.apache.cassandra.net.async;
 
-import java.net.InetSocketAddress;
-import java.util.Optional;
-
 import com.google.common.net.InetAddresses;
 import org.junit.After;
 import org.junit.Assert;
@@ -43,7 +40,6 @@ import io.netty.util.concurrent.GlobalEventExecutor;
 import org.apache.cassandra.auth.AllowAllInternodeAuthenticator;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.locator.InetAddressAndPort;
