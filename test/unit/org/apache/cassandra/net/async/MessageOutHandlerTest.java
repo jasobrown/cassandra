@@ -22,8 +22,6 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeoutException;
 
 import org.junit.Assert;
 import org.junit.Before;
@@ -73,15 +71,15 @@ public class MessageOutHandlerTest
     {
         OutboundConnectionIdentifier connectionId = OutboundConnectionIdentifier.small(InetAddressAndPort.getByNameOverrideDefaults("127.0.0.1", 0),
                                                                                        InetAddressAndPort.getByNameOverrideDefaults("127.0.0.2", 0));
-        OutboundMessagingConnection omc = new NonSendingOutboundMessagingConnection(connectionId, null, Optional.empty());
+        OutboundMessagingConnection omc = new NonSendingOutboundMessagingConnection(connectionId, null, null);
         channel = new EmbeddedChannel();
-        channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty());
-        handler = new MessageOutHandler(connectionId, MESSAGING_VERSION, channelWriter, () -> null, flushThreshold);
+        channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, null);
+        handler = new MessageOutHandler(connectionId, MESSAGING_VERSION, channelWriter, flushThreshold);
         channel.pipeline().addLast(handler);
     }
 
     @Test
-    public void write_NoFlush() throws ExecutionException, InterruptedException, TimeoutException
+    public void write_NoFlush()
     {
         MessageOut message = new MessageOut(MessagingService.Verb.ECHO);
         ChannelFuture future = channel.write(new QueuedMessage(message, 42));

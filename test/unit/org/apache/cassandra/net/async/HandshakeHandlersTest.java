@@ -21,7 +21,6 @@ package org.apache.cassandra.net.async;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.Optional;
 
 import com.google.common.net.InetAddresses;
 import org.junit.Assert;
@@ -89,13 +88,12 @@ public class HandshakeHandlersTest
         InboundHandshakeHandler inboundHandshakeHandler = new InboundHandshakeHandler(new TestAuthenticator(true));
         EmbeddedChannel inboundChannel = new EmbeddedChannel(inboundHandshakeHandler);
 
-        OutboundMessagingConnection imc = new OutboundMessagingConnection(connectionId, null, Optional.empty(), new AllowAllInternodeAuthenticator());
+        OutboundMessagingConnection imc = new OutboundMessagingConnection(connectionId, null, null, new AllowAllInternodeAuthenticator());
         OutboundConnectionParams params = OutboundConnectionParams.builder()
                                                                   .connectionId(connectionId)
                                                                   .callback(imc::finishHandshake)
                                                                   .mode(NettyFactory.Mode.MESSAGING)
                                                                   .protocolVersion(MessagingService.current_version)
-                                                                  .coalescingStrategy(Optional.empty())
                                                                   .build();
         OutboundHandshakeHandler outboundHandshakeHandler = new OutboundHandshakeHandler(params);
         EmbeddedChannel outboundChannel = new EmbeddedChannel(outboundHandshakeHandler);
@@ -182,13 +180,11 @@ public class HandshakeHandlersTest
                                                                   .callback(this::nop)
                                                                   .mode(NettyFactory.Mode.MESSAGING)
                                                                   .compress(compress)
-                                                                  .coalescingStrategy(Optional.empty())
                                                                   .protocolVersion(MessagingService.current_version)
-                                                                  .backlogSupplier(this::nopBacklog)
                                                                   .build();
         OutboundHandshakeHandler outboundHandshakeHandler = new OutboundHandshakeHandler(params);
         EmbeddedChannel outboundChannel = new EmbeddedChannel(outboundHandshakeHandler);
-        OutboundMessagingConnection omc = new OutboundMessagingConnection(connectionId, null, Optional.empty(), new AllowAllInternodeAuthenticator());
+        OutboundMessagingConnection omc = new OutboundMessagingConnection(connectionId, null, null, new AllowAllInternodeAuthenticator());
         omc.setTargetVersion(messagingVersion);
         outboundHandshakeHandler.setupPipeline(outboundChannel, messagingVersion);
 

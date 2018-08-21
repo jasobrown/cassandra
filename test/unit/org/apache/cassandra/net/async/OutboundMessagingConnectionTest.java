@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLHandshakeException;
@@ -82,9 +81,9 @@ public class OutboundMessagingConnectionTest
     public void setup()
     {
         connectionId = OutboundConnectionIdentifier.small(LOCAL_ADDR, REMOTE_ADDR);
-        omc = new OutboundMessagingConnection(connectionId, null, Optional.empty(), new AllowAllInternodeAuthenticator());
+        omc = new OutboundMessagingConnection(connectionId, null, null, new AllowAllInternodeAuthenticator());
         channel = new EmbeddedChannel();
-        omc.setChannelWriter(ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty()));
+        omc.setChannelWriter(ChannelWriter.create(channel, omc::handleMessageResult, null));
 
         snitch = DatabaseDescriptor.getEndpointSnitch();
         encryptionOptions = DatabaseDescriptor.getInternodeMessagingEncyptionOptions();
@@ -212,7 +211,7 @@ public class OutboundMessagingConnectionTest
         ScheduledFuture<?> connectionTimeoutFuture = new TestScheduledFuture();
         Assert.assertFalse(connectionTimeoutFuture.isCancelled());
         omc.setConnectionTimeoutFuture(connectionTimeoutFuture);
-        ChannelWriter channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty());
+        ChannelWriter channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, null);
         omc.setChannelWriter(channelWriter);
 
         omc.close(softClose);
@@ -361,7 +360,7 @@ public class OutboundMessagingConnectionTest
     @Test
     public void finishHandshake_GOOD()
     {
-        ChannelWriter channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty());
+        ChannelWriter channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, null);
         HandshakeResult result = HandshakeResult.success(channelWriter, MESSAGING_VERSION);
         ScheduledFuture<?> connectionTimeoutFuture = new TestScheduledFuture();
         Assert.assertFalse(connectionTimeoutFuture.isCancelled());
@@ -380,7 +379,7 @@ public class OutboundMessagingConnectionTest
     @Test
     public void finishHandshake_GOOD_ButClosed()
     {
-        ChannelWriter channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty());
+        ChannelWriter channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, null);
         HandshakeResult result = HandshakeResult.success(channelWriter, MESSAGING_VERSION);
         ScheduledFuture<?> connectionTimeoutFuture = new TestScheduledFuture();
         Assert.assertFalse(connectionTimeoutFuture.isCancelled());
@@ -447,7 +446,7 @@ public class OutboundMessagingConnectionTest
     @Test
     public void reconnectWithNewIp_HappyPath()
     {
-        ChannelWriter channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty());
+        ChannelWriter channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, null);
         omc.setChannelWriter(channelWriter);
         omc.setState(READY);
         OutboundConnectionIdentifier originalId = omc.getConnectionId();
@@ -491,7 +490,7 @@ public class OutboundMessagingConnectionTest
     public void maybeUpdateConnectionId_SameVersion()
     {
         ServerEncryptionOptions encryptionOptions = new ServerEncryptionOptions();
-        omc = new OutboundMessagingConnection(connectionId, encryptionOptions, Optional.empty(), new AllowAllInternodeAuthenticator());
+        omc = new OutboundMessagingConnection(connectionId, encryptionOptions, null, new AllowAllInternodeAuthenticator());
         OutboundConnectionIdentifier connectionId = omc.getConnectionId();
         int version = omc.getTargetVersion();
         omc.maybeUpdateConnectionId();
@@ -506,7 +505,7 @@ public class OutboundMessagingConnectionTest
         encryptionOptions.enabled = true;
         encryptionOptions.internode_encryption = ServerEncryptionOptions.InternodeEncryption.all;
         DatabaseDescriptor.setInternodeMessagingEncyptionOptions(encryptionOptions);
-        omc = new OutboundMessagingConnection(connectionId, encryptionOptions, Optional.empty(), new AllowAllInternodeAuthenticator());
+        omc = new OutboundMessagingConnection(connectionId, encryptionOptions, null, new AllowAllInternodeAuthenticator());
         int peerVersion = MessagingService.VERSION_30;
         MessagingService.instance().setVersion(connectionId.remote(), MessagingService.VERSION_30);
 

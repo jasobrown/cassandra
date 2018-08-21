@@ -59,7 +59,7 @@ public class ChannelWriterTest
     private EmbeddedChannel channel;
     private ChannelWriter channelWriter;
     private NonSendingOutboundMessagingConnection omc;
-    private Optional<CoalescingStrategy> coalescingStrategy;
+    private CoalescingStrategy coalescingStrategy;
 
     @BeforeClass
     public static void before()
@@ -73,16 +73,16 @@ public class ChannelWriterTest
         OutboundConnectionIdentifier id = OutboundConnectionIdentifier.small(InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.1"), 0),
                                                                              InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.2"), 0));
         channel = new EmbeddedChannel();
-        omc = new NonSendingOutboundMessagingConnection(id, null, Optional.empty());
-        channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty());
-        channel.pipeline().addFirst(new MessageOutHandler(id, MessagingService.current_version, channelWriter, () -> null));
+        omc = new NonSendingOutboundMessagingConnection(id, null, null);
+        channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, null);
+        channel.pipeline().addFirst(new MessageOutHandler(id, MessagingService.current_version, channelWriter));
         coalescingStrategy = CoalescingStrategies.newCoalescingStrategy(CoalescingStrategies.Strategy.FIXED.name(), COALESCE_WINDOW_MS, null, "test");
     }
 
     @Test
     public void create_nonCoalescing()
     {
-        Assert.assertSame(ChannelWriter.SimpleChannelWriter.class, ChannelWriter.create(channel, omc::handleMessageResult, Optional.empty()).getClass());
+        Assert.assertSame(ChannelWriter.SimpleChannelWriter.class, ChannelWriter.create(channel, omc::handleMessageResult, null));
     }
 
     @Test
@@ -181,7 +181,7 @@ public class ChannelWriterTest
     private CoalescingChannelWriter resetEnvForCoalescing(int minMessagesForCoalesce)
     {
         channel = new EmbeddedChannel();
-        CoalescingChannelWriter cw = new CoalescingChannelWriter(channel, omc::handleMessageResult, coalescingStrategy.get(), minMessagesForCoalesce);
+        CoalescingChannelWriter cw = new CoalescingChannelWriter(channel, omc::handleMessageResult, coalescingStrategy, minMessagesForCoalesce);
         channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter()
         {
             public void flush(ChannelHandlerContext ctx) throws Exception

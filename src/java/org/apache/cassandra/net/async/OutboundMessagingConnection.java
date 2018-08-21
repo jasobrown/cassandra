@@ -19,9 +19,6 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ScheduledExecutorService;
@@ -37,6 +34,7 @@ import org.slf4j.LoggerFactory;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.EventLoop;
 import io.netty.util.concurrent.Future;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
@@ -51,7 +49,6 @@ import org.apache.cassandra.net.async.OutboundHandshakeHandler.HandshakeResult;
 import org.apache.cassandra.utils.CoalescingStrategies;
 import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
 import org.apache.cassandra.utils.JVMStabilityInspector;
-import org.apache.cassandra.utils.NoSpamLogger;
 
 /**
  * Represents one connection to a peer, and handles the state transistions on the connection and the netty {@link Channel}
@@ -67,7 +64,6 @@ import org.apache.cassandra.utils.NoSpamLogger;
 public class OutboundMessagingConnection
 {
     static final Logger logger = LoggerFactory.getLogger(OutboundMessagingConnection.class);
-    private static final NoSpamLogger errorLogger = NoSpamLogger.getLogger(logger, 10, TimeUnit.SECONDS);
 
     private static final String INTRADC_TCP_NODELAY_PROPERTY = Config.PROPERTY_PREFIX + "otc_intradc_tcp_nodelay";
 
@@ -134,7 +130,10 @@ public class OutboundMessagingConnection
 
     private final AtomicReference<State> state;
 
-    private final Optional<CoalescingStrategy> coalescingStrategy;
+    private final CoalescingStrategy coalescingStrategy;
+
+    // TODO:JEB document me
+    private final EventLoop eventLoop;
 
     /**
      * A running count of the number of times we've tried to create a connection.
@@ -153,7 +152,7 @@ public class OutboundMessagingConnection
 
     OutboundMessagingConnection(OutboundConnectionIdentifier connectionId,
                                 ServerEncryptionOptions encryptionOptions,
-                                Optional<CoalescingStrategy> coalescingStrategy,
+                                CoalescingStrategy coalescingStrategy,
                                 IInternodeAuthenticator authenticator)
     {
         this(connectionId, encryptionOptions, coalescingStrategy, authenticator, ScheduledExecutors.scheduledFastTasks);
@@ -162,7 +161,7 @@ public class OutboundMessagingConnection
     @VisibleForTesting
     OutboundMessagingConnection(OutboundConnectionIdentifier connectionId,
                                 ServerEncryptionOptions encryptionOptions,
-                                Optional<CoalescingStrategy> coalescingStrategy,
+                                CoalescingStrategy coalescingStrategy,
                                 IInternodeAuthenticator authenticator,
                                 ScheduledExecutorService sceduledExecutor)
     {
@@ -175,6 +174,8 @@ public class OutboundMessagingConnection
         state = new AtomicReference<>(State.NOT_READY);
         this.scheduledExecutor = sceduledExecutor;
         this.coalescingStrategy = coalescingStrategy;
+
+        eventLoop = NettyFactory.instance.outboundGroup.next();
 
         // We want to use the most precise protocol version we know because while there is version detection on connect(),
         // the target version might be accessed by the pool (in getConnection()) before we actually connect (as we
@@ -202,26 +203,10 @@ public class OutboundMessagingConnection
 
     boolean sendMessage(QueuedMessage queuedMessage)
     {
-        State state = this.state.get();
-        if (state == State.READY)
-        {
-            if (channelWriter.write(queuedMessage, false))
-                return true;
+        backlog.add(queuedMessage);
 
-            backlog.add(queuedMessage);
-            return false;
-        }
-        else if (state == State.CLOSED)
-        {
-            errorLogger.warn("trying to write message to a closed connection");
-            return false;
-        }
-        else
-        {
-            backlog.add(queuedMessage);
-            connect();
-            return true;
-        }
+        // TODO:JEB check nitesh's volatile var
+        return true;
     }
 
     /**
@@ -332,28 +317,12 @@ public class OutboundMessagingConnection
                                                                   .coalescingStrategy(coalescingStrategy)
                                                                   .sendBufferSize(sendBufferSize)
                                                                   .tcpNoDelay(tcpNoDelay)
-                                                                  .backlogSupplier(() -> nextBackloggedMessage())
                                                                   .messageResultConsumer(this::handleMessageResult)
                                                                   .protocolVersion(targetVersion)
+                                                                  .eventLoop(eventLoop)
                                                                   .build();
 
         return NettyFactory.instance.createOutboundBootstrap(params);
-    }
-
-    private QueuedMessage nextBackloggedMessage()
-    {
-        QueuedMessage msg = backlog.poll();
-        if (msg == null)
-            return null;
-
-        if (!msg.isTimedOut())
-            return msg;
-
-        if (msg.shouldRetry())
-            return msg.createRetry();
-
-        droppedMessageCount.incrementAndGet();
-        return null;
     }
 
     static boolean isLocalDC(InetAddressAndPort localHost, InetAddressAndPort remoteHost)
@@ -481,7 +450,7 @@ public class OutboundMessagingConnection
                 assert result.channelWriter != null;
                 logger.debug("successfully connected to {}, compress = {}, coalescing = {}", connectionId,
                              shouldCompressConnection(connectionId.local(), connectionId.remote()),
-                             coalescingStrategy.isPresent() ? coalescingStrategy.get() : CoalescingStrategies.Strategy.DISABLED);
+                             coalescingStrategy != null ? coalescingStrategy : CoalescingStrategies.Strategy.DISABLED);
                 if (state.get() == State.CLOSED)
                 {
                     result.channelWriter.close();

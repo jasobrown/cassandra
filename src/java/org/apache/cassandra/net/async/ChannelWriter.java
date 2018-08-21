@@ -19,7 +19,6 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
-import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -165,10 +164,10 @@ abstract class ChannelWriter
      * Creates a new {@link ChannelWriter} using the (assumed properly connected) provided channel, and using coalescing
      * based on the provided strategy.
      */
-    static ChannelWriter create(Channel channel, Consumer<MessageResult> messageResultConsumer, Optional<CoalescingStrategy> coalescingStrategy)
+    static ChannelWriter create(Channel channel, Consumer<MessageResult> messageResultConsumer, CoalescingStrategy coalescingStrategy)
     {
-        return coalescingStrategy.isPresent()
-               ? new CoalescingChannelWriter(channel, messageResultConsumer, coalescingStrategy.get())
+        return coalescingStrategy != null
+               ? new CoalescingChannelWriter(channel, messageResultConsumer, coalescingStrategy)
                : new SimpleChannelWriter(channel, messageResultConsumer);
     }
 

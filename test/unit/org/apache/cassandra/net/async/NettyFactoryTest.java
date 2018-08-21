@@ -252,7 +252,6 @@ public class NettyFactoryTest
         OutboundConnectionIdentifier id = OutboundConnectionIdentifier.gossip(LOCAL_ADDR, REMOTE_ADDR);
         OutboundConnectionParams params = OutboundConnectionParams.builder()
                                                                   .connectionId(id)
-                                                                  .coalescingStrategy(Optional.empty())
                                                                   .protocolVersion(MessagingService.current_version)
                                                                   .build();
         return factory.createOutboundBootstrap(params);
