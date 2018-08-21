@@ -18,204 +18,37 @@
 
 package org.apache.cassandra.net.async;
 
-import java.util.Optional;
+import java.net.UnknownHostException;
 
 import org.junit.Assert;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
 
-import io.netty.channel.ChannelFuture;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
-import io.netty.channel.ChannelPromise;
-import io.netty.channel.DefaultChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.handler.codec.UnsupportedMessageTypeException;
 import io.netty.handler.timeout.IdleStateEvent;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.io.IVersionedSerializer;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.net.MessageOut;
-import org.apache.cassandra.net.MessagingService;
 
 public class MessageOutHandlerTest
 {
-    private static final int MESSAGING_VERSION = MessagingService.current_version;
-
-    private ChannelWriter channelWriter;
     private EmbeddedChannel channel;
-    private MessageOutHandler handler;
-
-    @BeforeClass
-    public static void before()
-    {
-        DatabaseDescriptor.daemonInitialization();
-        DatabaseDescriptor.createAllDirectories();
-    }
 
     @Before
-    public void setup() throws Exception
-    {
-        setup(MessageOutHandler.AUTO_FLUSH_THRESHOLD);
-    }
-
-    private void setup(int flushThreshold) throws Exception
+    public void setUp() throws UnknownHostException
     {
         OutboundConnectionIdentifier connectionId = OutboundConnectionIdentifier.small(InetAddressAndPort.getByNameOverrideDefaults("127.0.0.1", 0),
                                                                                        InetAddressAndPort.getByNameOverrideDefaults("127.0.0.2", 0));
-        OutboundMessagingConnection omc = new NonSendingOutboundMessagingConnection(connectionId, null, Optional.empty());
-        channel = new EmbeddedChannel();
+        channel = new EmbeddedChannel(new MessageOutHandler(connectionId));
 
-        OutboundConnectionParams params = OutboundConnectionParams.builder()
-                                                                  .messageResultConsumer(omc::handleMessageResult)
-                                                                  .coalescingStrategy(Optional.empty())
-                                                                  .protocolVersion(MessagingService.current_version)
-                                                                  .connectionId(connectionId)
-                                                                  .build();
-
-        channelWriter = ChannelWriter.create(channel, params);
-        handler = new MessageOutHandler(connectionId, MESSAGING_VERSION, channelWriter, () -> null, flushThreshold);
-        channel.pipeline().addLast(handler);
-    }
-
-    @Test
-    public void write_NoFlush()
-    {
-        MessageOut message = new MessageOut(MessagingService.Verb.ECHO);
-        ChannelFuture future = channel.write(new QueuedMessage(message, 42));
-        Assert.assertTrue(!future.isDone());
-        Assert.assertFalse(channel.releaseOutbound());
-    }
-
-    @Test
-    public void write_WithFlush() throws Exception
-    {
-        setup(1);
-        MessageOut message = new MessageOut(MessagingService.Verb.ECHO);
-        ChannelFuture future = channel.write(new QueuedMessage(message, 42));
-        Assert.assertTrue(future.isSuccess());
-        Assert.assertTrue(channel.releaseOutbound());
-    }
-
-    @Test
-    public void serializeMessage()
-    {
-        channelWriter.pendingMessageCount.set(1);
-        QueuedMessage msg = new QueuedMessage(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), 1);
-        ChannelFuture future = channel.writeAndFlush(msg);
-
-        Assert.assertTrue(future.isSuccess());
-        Assert.assertTrue(1 <= channel.outboundMessages().size());
-        Assert.assertTrue(channel.releaseOutbound());
-    }
-
-    @Test
-    public void wrongMessageType()
-    {
-        ChannelPromise promise = new DefaultChannelPromise(channel);
-        Assert.assertFalse(handler.isMessageValid("this is the wrong message type", promise));
-
-        Assert.assertFalse(promise.isSuccess());
-        Assert.assertNotNull(promise.cause());
-        Assert.assertSame(UnsupportedMessageTypeException.class, promise.cause().getClass());
-    }
-
-    @Test
-    public void unexpiredMessage()
-    {
-        QueuedMessage msg = new QueuedMessage(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), 1);
-        ChannelPromise promise = new DefaultChannelPromise(channel);
-        Assert.assertTrue(handler.isMessageValid(msg, promise));
-
-        // we won't know if it was successful yet, but we'll know if it's a failure because cause will be set
-        Assert.assertNull(promise.cause());
-    }
-
-    @Test
-    public void expiredMessage()
-    {
-        QueuedMessage msg = new QueuedMessage(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), 1, 0, true, true);
-        ChannelPromise promise = new DefaultChannelPromise(channel);
-        Assert.assertFalse(handler.isMessageValid(msg, promise));
-
-        Assert.assertFalse(promise.isSuccess());
-        Assert.assertNotNull(promise.cause());
-        Assert.assertSame(ExpiredException.class, promise.cause().getClass());
-        Assert.assertTrue(channel.outboundMessages().isEmpty());
-    }
-
-    @Test
-    public void write_MessageTooLarge()
-    {
-        write_BadMessageSize(Integer.MAX_VALUE + 1);
-    }
-
-    @Test
-    public void write_MessageSizeIsBananas()
-    {
-        write_BadMessageSize(Integer.MIN_VALUE + 10000);
-    }
-
-    private void write_BadMessageSize(long size)
-    {
-        IVersionedSerializer<Object> serializer = new IVersionedSerializer<Object>()
-        {
-            public void serialize(Object o, DataOutputPlus out, int version)
-            {   }
-
-            public Object deserialize(DataInputPlus in, int version)
-            {
-                return null;
-            }
-
-            public long serializedSize(Object o, int version)
-            {
-                return size;
-            }
-        };
-        MessageOut message = new MessageOut(MessagingService.Verb.UNUSED_5, "payload", serializer);
-        ChannelFuture future = channel.write(new QueuedMessage(message, 42));
-        Throwable t = future.cause();
-        Assert.assertNotNull(t);
-        Assert.assertSame(IllegalStateException.class, t.getClass());
-        Assert.assertTrue(channel.isOpen());
-        Assert.assertFalse(channel.releaseOutbound());
-    }
-
-    @Test
-    public void writeForceExceptionPath()
-    {
-        IVersionedSerializer<Object> serializer = new IVersionedSerializer<Object>()
-        {
-            public void serialize(Object o, DataOutputPlus out, int version)
-            {
-                throw new RuntimeException("this exception is part of the test - DON'T PANIC");
-            }
-
-            public Object deserialize(DataInputPlus in, int version)
-            {
-                return null;
-            }
-
-            public long serializedSize(Object o, int version)
-            {
-                return 42;
-            }
-        };
-        MessageOut message = new MessageOut(MessagingService.Verb.UNUSED_5, "payload", serializer);
-        ChannelFuture future = channel.write(new QueuedMessage(message, 42));
-        Throwable t = future.cause();
-        Assert.assertNotNull(t);
-        Assert.assertFalse(channel.isOpen());
-        Assert.assertFalse(channel.releaseOutbound());
     }
 
     @Test
     public void userEventTriggered_RandomObject()
     {
+        EmbeddedChannel channel = new EmbeddedChannel();
         Assert.assertTrue(channel.isOpen());
         ChannelUserEventSender sender = new ChannelUserEventSender();
         channel.pipeline().addFirst(sender);
@@ -226,6 +59,7 @@ public class MessageOutHandlerTest
     @Test
     public void userEventTriggered_Idle_NoPendingBytes()
     {
+        EmbeddedChannel channel = new EmbeddedChannel();
         Assert.assertTrue(channel.isOpen());
         ChannelUserEventSender sender = new ChannelUserEventSender();
         channel.pipeline().addFirst(sender);
@@ -237,11 +71,14 @@ public class MessageOutHandlerTest
     public void userEventTriggered_Idle_WithPendingBytes()
     {
         Assert.assertTrue(channel.isOpen());
+        ByteBuf buf = UnpooledByteBufAllocator.DEFAULT.buffer(8);
+        buf.writeLong(42);
+
+        // EmbeddedChnnel.writeOutbound() calls flush() for each message, so we prevent that with the handler we add to the pipeline
         ChannelUserEventSender sender = new ChannelUserEventSender();
         channel.pipeline().addFirst(sender);
 
-        MessageOut message = new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE);
-        channel.writeOutbound(new QueuedMessage(message, 42));
+        channel.writeOutbound(buf);
         sender.sendEvent(IdleStateEvent.WRITER_IDLE_STATE_EVENT);
         Assert.assertFalse(channel.isOpen());
     }
@@ -259,6 +96,11 @@ public class MessageOutHandlerTest
         private void sendEvent(Object event)
         {
             ctx.fireUserEventTriggered(event);
+        }
+
+        public void flush(ChannelHandlerContext ctx)
+        {
+            // explicitly catch the flush() to avoid moving the buytes out of the pipeline
         }
     }
 }
