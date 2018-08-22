@@ -19,11 +19,10 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
-import java.util.Queue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -56,7 +55,7 @@ import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
  * When to flush mainly depends on whether we use message coalescing or not (see {@link CoalescingStrategies}).
  * <p>
  * Note that the callback functions are invoked on the netty event loop, which is (in almost all cases) different
- * from the thread that will be invoking {@link #write(QueuedMessage, boolean)}.
+ * from the thread that will be invoking {@link #write(QueuedMessage)}.
  *
  * <h3>Flushing without coalescing</h3>
  *
@@ -91,13 +90,13 @@ import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
  *  no coalescing case.
  *  <p>
  *  The second part is handled exactly like in the no coalescing case, see above.
- *  The first part is handled by {@link CoalescingChannelWriter#write(QueuedMessage, boolean)}. Whenever a message is sent, we check
+ *  The first part is handled by {@link CoalescingChannelWriter#write(QueuedMessage)}. Whenever a message is sent, we check
  *  if a flush has been already scheduled by the coalescing strategy. If one has, we're done, otherwise we ask the
  *  strategy when the next flush should happen and schedule one.
  *
  *<h2>Message timeouts and retries</h2>
  *
- * The main outward-facing method is {@link #write(QueuedMessage, boolean)}, where callers pass a
+ * The main outward-facing method is {@link #write(QueuedMessage)}, where callers pass a
  * {@link QueuedMessage}. If a message times out, as defined in {@link QueuedMessage#isTimedOut()},
  * the message listener {@link #handleMessageFuture(Future, QueuedMessage, boolean)} is invoked
  * with the cause being a {@link ExpiredException}. The message is not retried and it is dropped on the floor.
@@ -138,8 +137,8 @@ abstract class ChannelWriter
     protected final Channel channel;
     private volatile boolean closed;
 
-    /** Number of currently pending messages on this channel. */
-    final AtomicLong pendingMessageCount = new AtomicLong(0);
+   /** Number of currently pending messages on this channel. */
+    final Supplier<Integer> pendingMessageCountSupplier;
 
     /**
      * A consuming function that handles the result of each message sent.
@@ -153,10 +152,11 @@ abstract class ChannelWriter
      */
     private final MessageResult messageResult = new MessageResult();
 
-    protected ChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer)
+    protected ChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, Supplier<Integer> pendingMessageCountSupplier)
     {
         this.channel = channel;
         this.messageResultConsumer = messageResultConsumer;
+        this.pendingMessageCountSupplier = pendingMessageCountSupplier;
         channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).set(false);
     }
 
@@ -164,11 +164,11 @@ abstract class ChannelWriter
      * Creates a new {@link ChannelWriter} using the (assumed properly connected) provided channel, and using coalescing
      * based on the provided strategy.
      */
-    static ChannelWriter create(Channel channel, Consumer<MessageResult> messageResultConsumer, CoalescingStrategy coalescingStrategy)
+    static ChannelWriter create(Channel channel, OutboundConnectionParams params)
     {
-        return coalescingStrategy != null
-               ? new CoalescingChannelWriter(channel, messageResultConsumer, coalescingStrategy)
-               : new SimpleChannelWriter(channel, messageResultConsumer);
+        return params.coalescingStrategy != null
+               ? new CoalescingChannelWriter(channel, params.messageResultConsumer, params.coalescingStrategy, params.pendingMessageCountSupplier)
+               : new SimpleChannelWriter(channel, params.messageResultConsumer, params.pendingMessageCountSupplier);
     }
 
     /**
@@ -181,13 +181,11 @@ abstract class ChannelWriter
      * of this method, and instead keep it all in the future handler/event loop (which is single threaded).
      *
      * @param message the message to write/send.
-     * @param checkWritability a flag to indicate if the status of the channel should be checked before passing
-     * the message on to the {@link #channel}.
      * @return true if the message was written to the channel; else, false.
      */
-    boolean write(QueuedMessage message, boolean checkWritability)
+    boolean write(QueuedMessage message)
     {
-        if ( (checkWritability && (channel.isWritable()) || !channel.isOpen()) || !checkWritability)
+        if (channel.isWritable())
         {
             write0(message).addListener(f -> handleMessageFuture(f, message, true));
             return true;
@@ -217,39 +215,6 @@ abstract class ChannelWriter
         return true;
     }
 
-    /**
-     * Writes a backlog of message to this {@link ChannelWriter}. This is mostly equivalent to calling
-     * {@link #write(QueuedMessage, boolean)} for every message of the provided backlog queue, but
-     * it ignores any coalescing, triggering a flush only once after all messages have been sent.
-     *
-     * @param backlog the backlog of message to send.
-     * @return the count of items written to the channel from the queue.
-     */
-    int writeBacklog(Queue<QueuedMessage> backlog, boolean allowReconnect)
-    {
-        int count = 0;
-        while (true)
-        {
-            if (!channel.isWritable())
-                break;
-
-            QueuedMessage msg = backlog.poll();
-            if (msg == null)
-                break;
-
-            pendingMessageCount.incrementAndGet();
-            ChannelFuture future = channel.write(msg);
-            future.addListener(f -> handleMessageFuture(f, msg, allowReconnect));
-            count++;
-        }
-
-        // as this is an infrequent operation, don't bother coordinating with the instance-level flush task
-        if (count > 0)
-            channel.flush();
-
-        return count;
-    }
-
     void close()
     {
         if (closed)
@@ -257,11 +222,6 @@ abstract class ChannelWriter
 
         closed = true;
         channel.close();
-    }
-
-    long pendingMessageCount()
-    {
-        return pendingMessageCount.get();
     }
 
     /**
@@ -309,14 +269,13 @@ abstract class ChannelWriter
     @VisibleForTesting
     static class SimpleChannelWriter extends ChannelWriter
     {
-        private SimpleChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer)
+        private SimpleChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, Supplier<Integer> pendingMessageCountSupplier)
         {
-            super(channel, messageResultConsumer);
+            super(channel, messageResultConsumer, pendingMessageCountSupplier);
         }
 
         protected ChannelFuture write0(QueuedMessage message)
         {
-            pendingMessageCount.incrementAndGet();
             // We don't truly want to flush on every message but we do want to wake-up the netty event loop for the
             // channel so the message is processed right away, which is why we use writeAndFlush. This won't actually
             // flush, though, because onTriggeredFlush, which MessageOutHandler delegates to, does nothing. We will
@@ -327,7 +286,7 @@ abstract class ChannelWriter
 
         void onMessageProcessed(ChannelHandlerContext ctx)
         {
-            if (pendingMessageCount.decrementAndGet() == 0)
+            if (pendingMessageCountSupplier.get() == 0)
                 ctx.flush();
         }
 
@@ -351,22 +310,24 @@ abstract class ChannelWriter
         @VisibleForTesting
         final AtomicBoolean scheduledFlush = new AtomicBoolean(false);
 
-        CoalescingChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, CoalescingStrategy strategy)
+        CoalescingChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, CoalescingStrategy strategy,
+                                Supplier<Integer> pendingMessageCountSupplier)
         {
-            this (channel, messageResultConsumer, strategy, MIN_MESSAGES_FOR_COALESCE);
+            this (channel, messageResultConsumer, strategy, pendingMessageCountSupplier, MIN_MESSAGES_FOR_COALESCE);
         }
 
         @VisibleForTesting
-        CoalescingChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, CoalescingStrategy strategy, int minMessagesForCoalesce)
+        CoalescingChannelWriter(Channel channel, Consumer<MessageResult> messageResultConsumer, CoalescingStrategy strategy,
+                                Supplier<Integer> pendingMessageCountSupplier, int minMessagesForCoalesce)
         {
-            super(channel, messageResultConsumer);
+            super(channel, messageResultConsumer, pendingMessageCountSupplier);
             this.strategy = strategy;
             this.minMessagesForCoalesce = minMessagesForCoalesce;
         }
 
         protected ChannelFuture write0(QueuedMessage message)
         {
-            long pendingCount = pendingMessageCount.incrementAndGet();
+            long pendingCount = pendingMessageCountSupplier.get();
             ChannelFuture future = channel.write(message);
             strategy.newArrival(message);
 
@@ -405,7 +366,7 @@ abstract class ChannelWriter
 
         void onMessageProcessed(ChannelHandlerContext ctx)
         {
-            pendingMessageCount.decrementAndGet();
+            // nop
         }
 
         void onTriggeredFlush(ChannelHandlerContext ctx)

@@ -36,6 +36,7 @@ import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.UnsupportedMessageTypeException;
 import io.netty.handler.timeout.IdleState;
 import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.util.ReferenceCountUtil;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.ParameterType;
@@ -107,9 +108,9 @@ class MessageOutHandler extends ChannelDuplexHandler
     @Override
     public void write(ChannelHandlerContext ctx, Object o, ChannelPromise promise)
     {
-        // this is a temporary fix until https://github.com/netty/netty/pull/6867 is released (probably netty 4.1.13).
+        // this was a temporary fix until https://github.com/netty/netty/pull/6867 was released (probably netty 4.1.13).
         // TL;DR a closed channel can still process messages in the pipeline that were queued before the close.
-        // the channel handlers are removed from the channel potentially saync from the close operation.
+        // the channel handlers are removed from the channel potentially async from the close operation.
         if (!ctx.channel().isOpen())
         {
             logger.debug("attempting to process a message in the pipeline, but channel {} is closed", ctx.channel().id());
@@ -119,8 +120,13 @@ class MessageOutHandler extends ChannelDuplexHandler
         ByteBuf out = null;
         try
         {
-            if (!isMessageValid(o, promise))
+            if (!(o instanceof QueuedMessage))
+            {
+                ReferenceCountUtil.release(o);
+                promise.tryFailure(new UnsupportedMessageTypeException(connectionId + " msg must be an instance of " +
+                                                                       QueuedMessage.class.getSimpleName()));
                 return;
+            }
 
             QueuedMessage msg = (QueuedMessage) o;
 
@@ -157,32 +163,6 @@ class MessageOutHandler extends ChannelDuplexHandler
             // Make sure we signal the outChanel even in case of errors.
             channelWriter.onMessageProcessed(ctx);
         }
-    }
-
-    /**
-     * Test to see if the message passed in is a {@link QueuedMessage} and if it has timed out or not. If the checks fail,
-     * this method has the side effect of modifying the {@link ChannelPromise}.
-     */
-    boolean isMessageValid(Object o, ChannelPromise promise)
-    {
-        // optimize for the common case
-        if (o instanceof QueuedMessage)
-        {
-            if (!((QueuedMessage)o).isTimedOut())
-            {
-                return true;
-            }
-            else
-            {
-                promise.tryFailure(ExpiredException.INSTANCE);
-            }
-        }
-        else
-        {
-            promise.tryFailure(new UnsupportedMessageTypeException(connectionId +
-                                                                   " msg must be an instance of " + QueuedMessage.class.getSimpleName()));
-        }
-        return false;
     }
 
     /**
