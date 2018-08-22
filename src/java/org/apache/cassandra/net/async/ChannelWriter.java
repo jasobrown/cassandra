@@ -187,7 +187,7 @@ abstract class ChannelWriter
     {
         if (channel.isWritable())
         {
-            write0(message).addListener(f -> handleMessageFuture(f, message, true));
+            write0(message).addListener(f -> handleMessageFuture(f, message));
             return true;
         }
         return false;
@@ -199,9 +199,9 @@ abstract class ChannelWriter
      * Note: this is called from the netty event loop, so there is no race across multiple execution of this method.
      */
     @VisibleForTesting
-    void handleMessageFuture(Future<? super Void> future, QueuedMessage msg, boolean allowReconnect)
+    void handleMessageFuture(Future<? super Void> future, QueuedMessage msg)
     {
-        messageResult.setAll(this, msg, future, allowReconnect);
+        messageResult.setAll(this, msg, future);
         messageResultConsumer.accept(messageResult);
         messageResult.clearAll();
     }
@@ -239,7 +239,7 @@ abstract class ChannelWriter
     @VisibleForTesting
     boolean isClosed()
     {
-        return closed;
+        return closed || !channel.isOpen();
     }
 
     /**

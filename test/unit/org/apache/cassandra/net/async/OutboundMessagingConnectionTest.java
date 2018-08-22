@@ -35,6 +35,7 @@ import org.junit.Test;
 
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
+import io.netty.channel.DefaultChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.auth.AllowAllInternodeAuthenticator;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
@@ -516,4 +517,18 @@ public class OutboundMessagingConnectionTest
         Assert.assertEquals(InetAddressAndPort.getByAddressOverrideDefaults(REMOTE_ADDR.address, DatabaseDescriptor.getSSLStoragePort()), omc.getConnectionId().connectionAddress());
         Assert.assertEquals(peerVersion, omc.getTargetVersion());
     }
+
+    @Test
+    public void expiredMessage()
+    {
+        QueuedMessage msg = new QueuedMessage(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), 1, 0, true, true);
+        ChannelPromise promise = new DefaultChannelPromise(channel);
+        Assert.assertFalse(handler.isMessageValid(msg, promise));
+
+        Assert.assertFalse(promise.isSuccess());
+        Assert.assertNotNull(promise.cause());
+        Assert.assertSame(ExpiredException.class, promise.cause().getClass());
+        Assert.assertTrue(channel.outboundMessages().isEmpty());
+    }
+
 }

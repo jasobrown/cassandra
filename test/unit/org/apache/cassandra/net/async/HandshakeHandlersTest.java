@@ -47,7 +47,6 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.KeyspaceParams;
 
 import static org.apache.cassandra.net.async.InboundHandshakeHandler.State.HANDSHAKE_COMPLETE;
-import static org.apache.cassandra.net.async.OutboundMessagingConnection.State.READY;
 
 @RunWith(Parameterized.class)
 public class HandshakeHandlersTest
@@ -114,7 +113,6 @@ public class HandshakeHandlersTest
         while ((o = outboundChannel.readOutbound()) != null)
             inboundChannel.writeInbound(o);
 
-        Assert.assertEquals(READY, imc.getState());
         Assert.assertEquals(HANDSHAKE_COMPLETE, inboundHandshakeHandler.getState());
     }
 

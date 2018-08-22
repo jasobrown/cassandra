@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.net.async;
 
-import java.io.IOException;
 import java.util.HashMap;
 import java.util.UUID;
 
@@ -72,7 +71,13 @@ public class MessageOutHandlerTest
                                                                                        InetAddressAndPort.getByNameOverrideDefaults("127.0.0.2", 0));
         OutboundMessagingConnection omc = new NonSendingOutboundMessagingConnection(connectionId, null, null);
         channel = new EmbeddedChannel();
-        channelWriter = ChannelWriter.create(channel, omc::handleMessageResult, null);
+
+        OutboundConnectionParams params = OutboundConnectionParams.builder()
+                                                                  .messageResultConsumer(omc::handleMessageResult)
+                                                                  .protocolVersion(MESSAGING_VERSION)
+                                                                  .build();
+
+        channelWriter = ChannelWriter.create(channel, params);
         handler = new MessageOutHandler(connectionId, MESSAGING_VERSION, channelWriter, flushThreshold);
         channel.pipeline().addLast(handler);
     }
@@ -97,9 +102,8 @@ public class MessageOutHandlerTest
     }
 
     @Test
-    public void serializeMessage() throws IOException
+    public void serializeMessage()
     {
-        channelWriter.pendingMessageCount.set(1);
         QueuedMessage msg = new QueuedMessage(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), 1);
         ChannelFuture future = channel.writeAndFlush(msg);
 
@@ -112,35 +116,11 @@ public class MessageOutHandlerTest
     public void wrongMessageType()
     {
         ChannelPromise promise = new DefaultChannelPromise(channel);
-        Assert.assertFalse(handler.isMessageValid("this is the wrong message type", promise));
+        channel.write("this is the wrong message type", promise);
 
         Assert.assertFalse(promise.isSuccess());
         Assert.assertNotNull(promise.cause());
         Assert.assertSame(UnsupportedMessageTypeException.class, promise.cause().getClass());
-    }
-
-    @Test
-    public void unexpiredMessage()
-    {
-        QueuedMessage msg = new QueuedMessage(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), 1);
-        ChannelPromise promise = new DefaultChannelPromise(channel);
-        Assert.assertTrue(handler.isMessageValid(msg, promise));
-
-        // we won't know if it was successful yet, but we'll know if it's a failure because cause will be set
-        Assert.assertNull(promise.cause());
-    }
-
-    @Test
-    public void expiredMessage()
-    {
-        QueuedMessage msg = new QueuedMessage(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), 1, 0, true, true);
-        ChannelPromise promise = new DefaultChannelPromise(channel);
-        Assert.assertFalse(handler.isMessageValid(msg, promise));
-
-        Assert.assertFalse(promise.isSuccess());
-        Assert.assertNotNull(promise.cause());
-        Assert.assertSame(ExpiredException.class, promise.cause().getClass());
-        Assert.assertTrue(channel.outboundMessages().isEmpty());
     }
 
     @Test

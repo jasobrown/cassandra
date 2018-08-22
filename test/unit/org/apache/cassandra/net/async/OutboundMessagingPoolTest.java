@@ -116,10 +116,10 @@ public class OutboundMessagingPoolTest
     public void close()
     {
         for (ConnectionType type : INTERNODE_MESSAGING_CONN_TYPES)
-            Assert.assertNotSame(OutboundMessagingConnection.State.CLOSED, pool.getConnection(type).getState());
+            Assert.assertFalse(pool.getConnection(type).isClosed());
         pool.close(false);
         for (ConnectionType type : INTERNODE_MESSAGING_CONN_TYPES)
-            Assert.assertEquals(OutboundMessagingConnection.State.CLOSED, pool.getConnection(type).getState());
+            Assert.assertTrue(pool.getConnection(type).isClosed());
     }
 
     @Test

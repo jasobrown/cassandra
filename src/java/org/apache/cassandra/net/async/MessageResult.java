@@ -32,14 +32,12 @@ public class MessageResult
     ChannelWriter writer;
     QueuedMessage msg;
     Future<? super Void> future;
-    boolean allowReconnect;
 
-    void setAll(ChannelWriter writer, QueuedMessage msg, Future<? super Void> future, boolean allowReconnect)
+    void setAll(ChannelWriter writer, QueuedMessage msg, Future<? super Void> future)
     {
         this.writer = writer;
         this.msg = msg;
         this.future = future;
-        this.allowReconnect = allowReconnect;
     }
 
     void clearAll()
