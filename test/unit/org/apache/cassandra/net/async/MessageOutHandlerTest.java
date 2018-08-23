@@ -20,6 +20,7 @@ package org.apache.cassandra.net.async;
 
 import java.util.HashMap;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Assert;
 import org.junit.Before;
@@ -51,6 +52,7 @@ public class MessageOutHandlerTest
     private ChannelWriter channelWriter;
     private EmbeddedChannel channel;
     private MessageOutHandler handler;
+    private AtomicInteger pendingMessagesCount;
 
     @BeforeClass
     public static void before()
@@ -67,6 +69,7 @@ public class MessageOutHandlerTest
 
     private void setup(int flushThreshold) throws Exception
     {
+        pendingMessagesCount = new AtomicInteger();
         OutboundConnectionIdentifier connectionId = OutboundConnectionIdentifier.small(InetAddressAndPort.getByNameOverrideDefaults("127.0.0.1", 0),
                                                                                        InetAddressAndPort.getByNameOverrideDefaults("127.0.0.2", 0));
         OutboundMessagingConnection omc = new NonSendingOutboundMessagingConnection(connectionId, null, null);
@@ -75,6 +78,7 @@ public class MessageOutHandlerTest
         OutboundConnectionParams params = OutboundConnectionParams.builder()
                                                                   .messageResultConsumer(omc::handleMessageResult)
                                                                   .protocolVersion(MESSAGING_VERSION)
+                                                                  .pendingMessageCountSupplier(pendingMessagesCount::get)
                                                                   .build();
 
         channelWriter = ChannelWriter.create(channel, params);
@@ -85,6 +89,7 @@ public class MessageOutHandlerTest
     @Test
     public void write_NoFlush()
     {
+        pendingMessagesCount.set(10);
         MessageOut message = new MessageOut(MessagingService.Verb.ECHO);
         ChannelFuture future = channel.write(new QueuedMessage(message, 42));
         Assert.assertTrue(!future.isDone());
@@ -237,6 +242,7 @@ public class MessageOutHandlerTest
     @Test
     public void userEventTriggered_Idle_WithPendingBytes()
     {
+        pendingMessagesCount.set(10);
         Assert.assertTrue(channel.isOpen());
         ChannelUserEventSender sender = new ChannelUserEventSender();
         channel.pipeline().addFirst(sender);

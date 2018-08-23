@@ -20,6 +20,7 @@ package org.apache.cassandra.net.async;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -114,6 +115,7 @@ class MessageOutHandler extends ChannelDuplexHandler
         if (!ctx.channel().isOpen())
         {
             logger.debug("attempting to process a message in the pipeline, but channel {} is closed", ctx.channel().id());
+            promise.tryFailure(new ClosedChannelException());
             return;
         }
 

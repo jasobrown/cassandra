@@ -190,11 +190,17 @@ public class OutboundMessagingConnection
 
     boolean sendMessage(MessageOut msg, int id)
     {
+        if (isClosed())
+            return false;
+
         return sendMessage(new QueuedMessage(msg, id));
     }
 
     boolean sendMessage(QueuedMessage queuedMessage)
     {
+        if (isClosed())
+            return false;
+
         backlogSize.incrementAndGet();
         backlog.add(queuedMessage);
 
@@ -396,6 +402,8 @@ public class OutboundMessagingConnection
             return false;
         }
 
+        assert state.get() == STATE_CONNECTION_CREATE_RUNNING;
+
         // this is the success state
         final Throwable cause = future.cause();
         if (cause == null)
@@ -409,14 +417,14 @@ public class OutboundMessagingConnection
             if (logger.isTraceEnabled())
                 logger.trace("unable to connect on attempt {} to {}", connectAttemptCount, connectionId, cause);
             connectAttemptCount++;
-
-            assert state.get() == STATE_CONNECTION_CREATE_RUNNING;
             connectionRetryFuture = eventLoop.schedule(this::connect, OPEN_RETRY_DELAY_MS * connectAttemptCount, TimeUnit.MILLISECONDS);
         }
         else
         {
             JVMStabilityInspector.inspectThrowable(cause);
             logger.error("non-IO error attempting to connect to {}", connectionId, cause);
+            cleanupConnectionFutures();
+            setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
         }
         return false;
     }
@@ -425,6 +433,8 @@ public class OutboundMessagingConnection
      * A callback for handling timeouts when creating a connection/negotiating the handshake.
      *
      * Note: this method is invoked from the netty event loop.
+     *
+     * @return true if there was a timeout on the connect/handshake; else false.
      */
     boolean connectionTimeout(ChannelFuture channelFuture)
     {

@@ -176,9 +176,8 @@ abstract class ChannelWriter
      * <p>
      * We always want to write to the channel *unless* it's not writable yet still open.
      * If the channel is closed, the promise will be notifed as a fail (due to channel closed),
-     * and let the handler ({@link #handleMessageFuture(Future, QueuedMessage, boolean)})
-     * do the reconnect magic/dance. Thus we simplify when to reconnect by not burdening the (concurrent) callers
-     * of this method, and instead keep it all in the future handler/event loop (which is single threaded).
+     * and let the handler ({@link #handleMessageFuture(Future, QueuedMessage)})
+     * do the reconnect magic/dance.
      *
      * @param message the message to write/send.
      * @return true if the message was written to the channel; else, false.
