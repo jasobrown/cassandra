@@ -72,4 +72,14 @@ public class QueuedMessage implements CoalescingStrategies.Coalescable
     {
         return timestampNanos;
     }
+
+    @Override
+    public String toString()
+    {
+        return new StringBuilder()
+               .append("QueuedMessage: message = ").append(message)
+               .append(", id = ").append(id)
+               .append(", timedout = ").append(isTimedOut())
+               .toString();
+    }
 }

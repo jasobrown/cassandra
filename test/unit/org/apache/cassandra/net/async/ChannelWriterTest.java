@@ -26,11 +26,8 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
-import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -73,7 +70,6 @@ public class ChannelWriterTest
         pendingCount = new AtomicInteger();
 
         OutboundConnectionParams params = OutboundConnectionParams.builder()
-                                                                  .messageResultConsumer(omc::handleMessageResult)
                                                                   .protocolVersion(MessagingService.current_version)
                                                                   .pendingMessageCountSupplier(pendingCount::get)
                                                                   .build();
@@ -86,7 +82,6 @@ public class ChannelWriterTest
     public void create_nonCoalescing()
     {
         OutboundConnectionParams params = OutboundConnectionParams.builder()
-                                                                  .messageResultConsumer(omc::handleMessageResult)
                                                                   .protocolVersion(MessagingService.current_version)
                                                                   .build();
         Assert.assertSame(ChannelWriter.SimpleChannelWriter.class, ChannelWriter.create(channel, params).getClass());
@@ -96,7 +91,6 @@ public class ChannelWriterTest
     public void create_Coalescing()
     {
         OutboundConnectionParams params = OutboundConnectionParams.builder()
-                                                                  .messageResultConsumer(omc::handleMessageResult)
                                                                   .protocolVersion(MessagingService.current_version)
                                                                   .coalescingStrategy(coalescingStrategy)
                                                                   .build();
@@ -107,39 +101,9 @@ public class ChannelWriterTest
     public void write_IsWritable()
     {
         Assert.assertTrue(channel.isWritable());
-        Assert.assertTrue(channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42)));
+        channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42));
         Assert.assertTrue(channel.isWritable());
         Assert.assertTrue(channel.releaseOutbound());
-    }
-
-    @Test
-    public void write_NotWritable()
-    {
-        channel.config().setOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(1, 2));
-
-        // send one message through, which will trigger the writability check (and turn it off)
-        Assert.assertTrue(channel.isWritable());
-        ByteBuf buf = channel.alloc().buffer(8, 8);
-        channel.unsafe().outboundBuffer().addMessage(buf, buf.capacity(), channel.newPromise());
-        Assert.assertFalse(channel.isWritable());
-        Assert.assertFalse(channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42)));
-        Assert.assertFalse(channel.isWritable());
-        Assert.assertFalse(channel.releaseOutbound());
-        buf.release();
-    }
-
-    @Test
-    public void write_NotWritableButWriteAnyway()
-    {
-        channel.config().setOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(1, 2));
-
-        // send one message through, which will trigger the writability check (and turn it off)
-        Assert.assertTrue(channel.isWritable());
-        ByteBuf buf = channel.alloc().buffer(8, 8);
-        channel.unsafe().outboundBuffer().addMessage(buf, buf.capacity(), channel.newPromise());
-        Assert.assertFalse(channel.isWritable());
-        Assert.assertFalse(channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42)));
-        buf.release();
     }
 
     @Test
@@ -150,7 +114,7 @@ public class ChannelWriterTest
         Assert.assertEquals(0, channel.unsafe().outboundBuffer().totalPendingWriteBytes());
 
         pendingCount.set(1);
-        Assert.assertTrue(channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42)));
+        channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42));
         Assert.assertTrue(channel.unsafe().outboundBuffer().totalPendingWriteBytes() > 0);
         Assert.assertFalse(channel.releaseOutbound());
         Assert.assertTrue(channelWriter.scheduledFlush.get());
@@ -165,7 +129,7 @@ public class ChannelWriterTest
         Assert.assertFalse(channelWriter.scheduledFlush.get());
 
         pendingCount.set(1);
-        Assert.assertTrue(channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42)));
+        channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42));
 
         Assert.assertEquals(0, channel.unsafe().outboundBuffer().totalPendingWriteBytes());
         Assert.assertTrue(channel.releaseOutbound());
@@ -181,7 +145,7 @@ public class ChannelWriterTest
         Assert.assertFalse(channelWriter.scheduledFlush.get());
 
         pendingCount.set(1);
-        Assert.assertTrue(channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42)));
+        channelWriter.write(new QueuedMessage(new MessageOut<>(ECHO), 42));
 
         Assert.assertTrue(channelWriter.scheduledFlush.get());
         Assert.assertTrue(channel.unsafe().outboundBuffer().totalPendingWriteBytes() > 0);
@@ -198,7 +162,7 @@ public class ChannelWriterTest
     private CoalescingChannelWriter resetEnvForCoalescing(int minMessagesForCoalesce)
     {
         channel = new EmbeddedChannel();
-        CoalescingChannelWriter cw = new CoalescingChannelWriter(channel, omc::handleMessageResult, coalescingStrategy, pendingCount::get, minMessagesForCoalesce);
+        CoalescingChannelWriter cw = new CoalescingChannelWriter(channel, coalescingStrategy, pendingCount::get, minMessagesForCoalesce);
         channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter()
         {
             public void flush(ChannelHandlerContext ctx) throws Exception

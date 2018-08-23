@@ -232,20 +232,15 @@ public class OutboundMessagingConnection
     // TODO:JEB doc me, but assumes a) we're on the event loop, b) channel/channelWriter are set up, c) state == QUEUE_CONSUMER_STATE_RUNNING
     private boolean dequeueMessage()
     {
-        assert queueConsumerState == QUEUE_CONSUMER_STATE_RUNNING;
+        if (isClosed() || !channelWriter.channel.isWritable())
+            return false;
 
         while (true)
         {
-            // only peek here, because if we cannot write to the channelWriter, we still want the message
-            // to be at the head of the queue. of course, if we do write to the channelWriter, we need
-            // to remove the message later (which we do).
-            QueuedMessage next = backlog.peek();
+            QueuedMessage next = backlog.poll();
             if (next == null)
                 return false;
 
-            // decrement the backlogSize here as when we call channelWriter.write() it will be processed in-line (on this thread,
-            // as we're on the event loop). in some implementations, channelWriter.onMessagedProcessed() will want the counter
-            // to already be decremented (because it believes the size to be already adjusted).
             backlogSize.decrementAndGet();
 
             if (next.isTimedOut())
@@ -254,21 +249,8 @@ public class OutboundMessagingConnection
                 continue;
             }
 
-            if (channelWriter.write(next))
-            {
-                backlog.remove();
-                return true;
-            }
-            else
-            {
-                // if we could not push the message into the channel, fix up the counter, as per above comment
-                backlogSize.incrementAndGet();
-
-                // TODO:JEB we need to wait for a signal from the channel that we can once again write to it!!
-                // on that signal, we will probably need to reschedule the maybeStartDequeuing() task
-
-                return false;
-            }
+            channelWriter.write(next).addListener(future -> handleMessageResult(next, future));
+            return true;
         }
     }
 
@@ -361,7 +343,6 @@ public class OutboundMessagingConnection
                                                                   .coalescingStrategy(coalescingStrategy)
                                                                   .sendBufferSize(sendBufferSize)
                                                                   .tcpNoDelay(tcpNoDelay)
-                                                                  .messageResultConsumer(this::handleMessageResult)
                                                                   .protocolVersion(targetVersion)
                                                                   .eventLoop(eventLoop)
                                                                   .pendingMessageCountSupplier(backlogSize::get)
@@ -543,14 +524,14 @@ public class OutboundMessagingConnection
      * Note: this function is expected to be invoked on the netty event loop. Also, do not retain any state from
      * the input {@code messageResult}.
      */
-    void handleMessageResult(MessageResult messageResult)
+    void handleMessageResult(QueuedMessage message, Future<? super Void> future)
     {
         completedMessageCount.incrementAndGet();
 
         // checking the cause() is an optimized way to tell if the operation was successful (as the cause will be null)
         // Note that ExpiredException is just a marker for timeout-ed message we're dropping, but as we already
         // incremented the dropped message count in MessageOutHandler, we have nothing to do.
-        Throwable cause = messageResult.future.cause();
+        Throwable cause = future.cause();
         if (cause == null)
         {
             if (!dequeueMessage())
@@ -567,24 +548,22 @@ public class OutboundMessagingConnection
 
         if (cause instanceof IOException || cause.getCause() instanceof IOException)
         {
-            ChannelWriter writer = messageResult.writer;
-            if (writer.shouldPurgeBacklog())
+            if (channelWriter.shouldPurgeBacklog())
                 purgeBacklog();
 
             // This writer needs to be closed and we need to trigger a reconnection. We really only want to do that
             // once for this channel however (and again, no race because we're on the netty event loop).
-            if (!writer.isClosed())
+            if (!channelWriter.isClosed())
             {
                 reconnect();
-                writer.close();
+                channelWriter.close();
             }
 
             // maybe reenqueue the victim message
-            QueuedMessage msg = messageResult.msg;
-            if (msg != null && msg.shouldRetry())
-                sendMessage(msg.createRetry());
+            if (message != null && message.shouldRetry())
+                sendMessage(message.createRetry());
         }
-        else if (messageResult.future.isCancelled())
+        else if (future.isCancelled())
         {
             // Someone cancelled the future, which we assume meant it doesn't want the message to be sent if it hasn't
             // yet. Just ignore.

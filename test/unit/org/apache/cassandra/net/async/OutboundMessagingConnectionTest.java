@@ -69,7 +69,6 @@ public class OutboundMessagingConnectionTest
 
     private IEndpointSnitch snitch;
     private ServerEncryptionOptions encryptionOptions;
-    private MessageResult messageResult;
 
     @BeforeClass
     public static void before()
@@ -84,7 +83,6 @@ public class OutboundMessagingConnectionTest
         omc = new OutboundMessagingConnection(connectionId, null, null, new AllowAllInternodeAuthenticator());
         channel = new EmbeddedChannel();
         OutboundConnectionParams params = OutboundConnectionParams.builder()
-                                                                  .messageResultConsumer(omc::handleMessageResult)
                                                                   .protocolVersion(MESSAGING_VERSION)
                                                                   .build();
         channelWriter = ChannelWriter.create(channel, params);
@@ -92,7 +90,6 @@ public class OutboundMessagingConnectionTest
 
         snitch = DatabaseDescriptor.getEndpointSnitch();
         encryptionOptions = DatabaseDescriptor.getInternodeMessagingEncyptionOptions();
-        messageResult = new MessageResult();
     }
 
     @After
@@ -520,8 +517,7 @@ public class OutboundMessagingConnectionTest
     {
         ChannelPromise promise = channel.newPromise();
         promise.cancel(false);
-        messageResult.setAll(channelWriter, new QueuedMessage(new MessageOut<>(ECHO), 1), promise);
-        omc.handleMessageResult(messageResult);
+        omc.handleMessageResult(new QueuedMessage(new MessageOut<>(ECHO), 1), promise);
         Assert.assertTrue(channel.isActive());
         Assert.assertEquals(1, omc.getCompletedMessages().longValue());
         Assert.assertEquals(0, omc.getDroppedMessages().longValue());
@@ -532,8 +528,7 @@ public class OutboundMessagingConnectionTest
     {
         ChannelPromise promise = channel.newPromise();
         promise.setFailure(new NullPointerException("this is a test"));
-        messageResult.setAll(channelWriter, new QueuedMessage(new MessageOut<>(ECHO), 1), promise);
-        omc.handleMessageResult(messageResult);
+        omc.handleMessageResult(new QueuedMessage(new MessageOut<>(ECHO), 1), promise);
         Assert.assertTrue(channel.isActive());
         Assert.assertEquals(1, omc.getCompletedMessages().longValue());
         Assert.assertEquals(0, omc.getDroppedMessages().longValue());
@@ -546,10 +541,7 @@ public class OutboundMessagingConnectionTest
         ChannelPromise promise = channel.newPromise();
         promise.setFailure(new IOException("this is a test"));
         Assert.assertTrue(channel.isActive());
-
-        messageResult.setAll(channelWriter, new QueuedMessage(new MessageOut<>(ECHO), 1, 0, true, true), promise);
-        omc.handleMessageResult(messageResult);
-
+        omc.handleMessageResult(new QueuedMessage(new MessageOut<>(ECHO), 1, 0, true, true), promise);
         Assert.assertFalse(channel.isActive());
         Assert.assertEquals(1, omc.getCompletedMessages().longValue());
         Assert.assertEquals(0, omc.getDroppedMessages().longValue());
@@ -562,10 +554,7 @@ public class OutboundMessagingConnectionTest
         ChannelPromise promise = channel.newPromise();
         promise.cancel(false);
         Assert.assertTrue(channel.isActive());
-        QueuedMessage message = new QueuedMessage(new MessageOut<>(ECHO), 1, 0, true, true);
-        messageResult.setAll(channelWriter, message, promise);
-        omc.handleMessageResult(messageResult);
-
+        omc.handleMessageResult(new QueuedMessage(new MessageOut<>(ECHO), 1, 0, true, true), promise);
         Assert.assertTrue(channel.isActive());
         Assert.assertEquals(1, omc.getCompletedMessages().longValue());
         Assert.assertEquals(0, omc.getDroppedMessages().longValue());

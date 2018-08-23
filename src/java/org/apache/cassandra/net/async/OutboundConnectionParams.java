@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.net.async;
 
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -25,6 +26,7 @@ import com.google.common.base.Preconditions;
 
 import io.netty.channel.EventLoop;
 import io.netty.channel.WriteBufferWaterMark;
+import io.netty.util.concurrent.Future;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
 import org.apache.cassandra.net.async.OutboundHandshakeHandler.HandshakeResult;
 import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
@@ -44,7 +46,6 @@ public class OutboundConnectionParams
     final CoalescingStrategy coalescingStrategy;
     final int sendBufferSize;
     final boolean tcpNoDelay;
-    final Consumer<MessageResult> messageResultConsumer;
     final WriteBufferWaterMark waterMark;
     final int protocolVersion;
     final EventLoop eventLoop;
@@ -58,7 +59,6 @@ public class OutboundConnectionParams
                                      CoalescingStrategy coalescingStrategy,
                                      int sendBufferSize,
                                      boolean tcpNoDelay,
-                                     Consumer<MessageResult> messageResultConsumer,
                                      WriteBufferWaterMark waterMark,
                                      int protocolVersion,
                                      EventLoop eventLoop,
@@ -72,7 +72,6 @@ public class OutboundConnectionParams
         this.coalescingStrategy = coalescingStrategy;
         this.sendBufferSize = sendBufferSize;
         this.tcpNoDelay = tcpNoDelay;
-        this.messageResultConsumer = messageResultConsumer;
         this.waterMark = waterMark;
         this.protocolVersion = protocolVersion;
         this.eventLoop = eventLoop;
@@ -99,7 +98,6 @@ public class OutboundConnectionParams
         private CoalescingStrategy coalescingStrategy;
         private int sendBufferSize = DEFAULT_SEND_BUFFER_SIZE;
         private boolean tcpNoDelay;
-        private Consumer<MessageResult> messageResultConsumer;
         private WriteBufferWaterMark waterMark = WriteBufferWaterMark.DEFAULT;
         private EventLoop eventLoop;
         private Supplier<Integer> pendingMessageCountSupplier;
@@ -118,7 +116,6 @@ public class OutboundConnectionParams
             this.coalescingStrategy = params.coalescingStrategy;
             this.sendBufferSize = params.sendBufferSize;
             this.tcpNoDelay = params.tcpNoDelay;
-            this.messageResultConsumer = params.messageResultConsumer;
             this.eventLoop = params.eventLoop;
             this.pendingMessageCountSupplier = params.pendingMessageCountSupplier;
         }
@@ -171,12 +168,6 @@ public class OutboundConnectionParams
             return this;
         }
 
-        public Builder messageResultConsumer(Consumer<MessageResult> messageResultConsumer)
-        {
-            this.messageResultConsumer = messageResultConsumer;
-            return this;
-        }
-
         public Builder waterMark(WriteBufferWaterMark waterMark)
         {
             this.waterMark = waterMark;
@@ -207,7 +198,7 @@ public class OutboundConnectionParams
             Preconditions.checkArgument(sendBufferSize > 0 && sendBufferSize < 1 << 20, "illegal send buffer size: " + sendBufferSize);
 
             return new OutboundConnectionParams(connectionId, callback, encryptionOptions, mode, compress, coalescingStrategy, sendBufferSize,
-                                                tcpNoDelay, messageResultConsumer, waterMark, protocolVersion, eventLoop, pendingMessageCountSupplier);
+                                                tcpNoDelay, waterMark, protocolVersion, eventLoop, pendingMessageCountSupplier);
         }
     }
 }

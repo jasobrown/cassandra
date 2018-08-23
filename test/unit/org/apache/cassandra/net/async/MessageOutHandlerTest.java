@@ -72,11 +72,9 @@ public class MessageOutHandlerTest
         pendingMessagesCount = new AtomicInteger();
         OutboundConnectionIdentifier connectionId = OutboundConnectionIdentifier.small(InetAddressAndPort.getByNameOverrideDefaults("127.0.0.1", 0),
                                                                                        InetAddressAndPort.getByNameOverrideDefaults("127.0.0.2", 0));
-        OutboundMessagingConnection omc = new NonSendingOutboundMessagingConnection(connectionId, null, null);
         channel = new EmbeddedChannel();
 
         OutboundConnectionParams params = OutboundConnectionParams.builder()
-                                                                  .messageResultConsumer(omc::handleMessageResult)
                                                                   .protocolVersion(MESSAGING_VERSION)
                                                                   .pendingMessageCountSupplier(pendingMessagesCount::get)
                                                                   .build();
