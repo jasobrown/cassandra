@@ -23,7 +23,6 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLong;
@@ -83,20 +82,10 @@ public class OutboundMessagingConnection
      */
     private static final int MINIMUM_CONNECT_TIMEOUT_MS = 2000;
 
-    /**
-     * Describes this instance's ability to send messages into it's Netty {@link Channel}.
-     */
-    enum State
-    {
-        /** waiting to create the connection */
-        NOT_READY,
-        /** we've started to create the connection/channel */
-        CREATING_CHANNEL,
-        /** channel is established and we can send messages */
-        READY,
-        /** a dead state which should not be transitioned away from */
-        CLOSED
-    }
+    // TODO:JEB document me!!
+    static final int STATE_CONNECTION_CREATE_IDLE = 0;
+    static final int STATE_CONNECTION_CREATE_RUNNING = 1;
+    static final int STATE_CONNECTION_CLOSED = 2;
 
     // TODO:JEB document me!!
     static final int QUEUE_CONSUMER_STATE_IDLE = 0;
@@ -160,10 +149,9 @@ public class OutboundMessagingConnection
      */
     private int targetVersion;
 
-    private volatile boolean closed;
-
     // TODO:JEB doc me -- also, FIX ME !!!!
-    private final AtomicBoolean connectingState;
+    // to protect against concurrent (re-)connect attempts
+    private final AtomicInteger state;
 
 
     // TODO:JEB doc me
@@ -184,8 +172,7 @@ public class OutboundMessagingConnection
         backlogSize = new AtomicInteger(0);
         droppedMessageCount = new AtomicLong(0);
         completedMessageCount = new AtomicLong(0);
-        connectingState = new AtomicBoolean();
-//        state = new AtomicReference<>(State.NOT_READY);
+        state = new AtomicInteger(STATE_CONNECTION_CREATE_IDLE);
         this.coalescingStrategy = coalescingStrategy;
         queueConsumerState = QUEUE_CONSUMER_STATE_IDLE;
 
@@ -221,7 +208,7 @@ public class OutboundMessagingConnection
     // TODO:JEB doc me, but this should only execute on the event loop
     boolean maybeStartDequeuing()
     {
-        if (closed || backlog.isEmpty())
+        if (isClosed() || backlog.isEmpty())
             return false;
 
         if (channelWriter == null || channelWriter.isClosed())
@@ -287,10 +274,10 @@ public class OutboundMessagingConnection
      * <p>
      * Note: this should only be invoked on the event loop.
      */
-    void connect()
+    boolean connect()
     {
-        if (closed || !connectingState.compareAndSet(false, true))
-            return;
+        if (isClosed())
+            return false;
 
         // clean up any lingering connection attempts
         cleanupConnectionFutures();
@@ -306,7 +293,7 @@ public class OutboundMessagingConnection
 
             // don't update the state field as destroyConnectionPool() *should* call OMC.close()
             // on all the connections in the OMP for the remoteAddress
-            return;
+            return false;
         }
 
         boolean compress = shouldCompressConnection(connectionId.local(), connectionId.remote());
@@ -317,6 +304,7 @@ public class OutboundMessagingConnection
 
         long timeout = Math.max(MINIMUM_CONNECT_TIMEOUT_MS, DatabaseDescriptor.getRpcTimeout());
         connectionTimeoutFuture = eventLoop.schedule(() -> connectionTimeout(connectFuture), timeout, TimeUnit.MILLISECONDS);
+        return true;
     }
 
     @VisibleForTesting
@@ -402,7 +390,7 @@ public class OutboundMessagingConnection
         ChannelFuture channelFuture = (ChannelFuture)future;
 
         // make sure this instance is not (terminally) closed
-        if (closed)
+        if (isClosed())
         {
             channelFuture.channel().close();
             return false;
@@ -421,6 +409,8 @@ public class OutboundMessagingConnection
             if (logger.isTraceEnabled())
                 logger.trace("unable to connect on attempt {} to {}", connectAttemptCount, connectionId, cause);
             connectAttemptCount++;
+
+            assert state.get() == STATE_CONNECTION_CREATE_RUNNING;
             connectionRetryFuture = eventLoop.schedule(this::connect, OPEN_RETRY_DELAY_MS * connectAttemptCount, TimeUnit.MILLISECONDS);
         }
         else
@@ -436,18 +426,20 @@ public class OutboundMessagingConnection
      *
      * Note: this method is invoked from the netty event loop.
      */
-    void connectionTimeout(ChannelFuture channelFuture)
+    boolean connectionTimeout(ChannelFuture channelFuture)
     {
         cleanupConnectionFutures();
         connectAttemptCount = 0;
-        if (closed)
-            return;
+        if (isClosed())
+            return false;
 
         if (logger.isDebugEnabled())
             logger.debug("timed out while trying to connect to {}", connectionId);
 
         channelFuture.channel().close();
         purgeBacklog();
+        setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
+        return true;
     }
 
     /**
@@ -472,7 +464,7 @@ public class OutboundMessagingConnection
             case SUCCESS:
                 assert result.channelWriter != null;
 
-                if (closed || result.channelWriter.isClosed())
+                if (isClosed() || result.channelWriter.isClosed())
                 {
                     result.channelWriter.close();
                     purgeBacklog();
@@ -487,14 +479,14 @@ public class OutboundMessagingConnection
                 }
                 channelWriter = result.channelWriter;
                 maybeStartDequeuing();
-                connectingState.set(false);
+                setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
                 break;
             case DISCONNECT:
-                connectingState.set(false);
+                setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
                 reconnect();
                 break;
             case NEGOTIATION_FAILURE:
-                connectingState.set(false);
+                setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
                 purgeBacklog();
                 break;
             default:
@@ -520,15 +512,14 @@ public class OutboundMessagingConnection
         }
     }
 
-    //    @VisibleForTesting
-//    static boolean setStateIfNotClosed(AtomicReference<State> state, State newState)
-//    {
-//        State s = state.get();
-//        if (s == State.CLOSED)
-//            return false;
-//        state.set(newState);
-//        return true;
-//    }
+    @VisibleForTesting
+    static boolean setStateIfNotClosed(AtomicInteger state, int nextState)
+    {
+        int currentState = state.get();
+        if (currentState == STATE_CONNECTION_CLOSED)
+            return false;
+        return state.compareAndSet(currentState, nextState);
+    }
 
     int getTargetVersion()
     {
@@ -604,7 +595,7 @@ public class OutboundMessagingConnection
     void reconnectWithNewIp(InetAddressAndPort newAddr)
     {
         // if we're closed, ignore the request
-        if (closed)
+        if (isClosed())
             return;
 
         // capture a reference to the current channel, in case it gets swapped out before we can call close() on it
@@ -619,10 +610,12 @@ public class OutboundMessagingConnection
 
     /**
      * Schedule {@link #connect()} to attempt to reconnect.
+     *
+     * @return A future is this thread won a race to kick off the connect process; else, null.
      */
-    private Future<?> reconnect()
+    Future<?> reconnect()
     {
-        if (!closed && connectingState.compareAndSet(false, true))
+        if (state.compareAndSet(STATE_CONNECTION_CREATE_IDLE, STATE_CONNECTION_CREATE_RUNNING))
             return eventLoop.submit(this::connect);
 
         // TODO:JEB fix this
@@ -639,15 +632,13 @@ public class OutboundMessagingConnection
      * Permanently close this instance.
      *
      * Note: should not be invoked on the event loop.
-     *
-     * @param softClose
      */
     public void close(boolean softClose)
     {
-        if (closed)
+        if (isClosed())
             return;
 
-        closed = true;
+        state.set(STATE_CONNECTION_CLOSED);
         cleanupConnectionFutures();
 
         // drain the backlog
@@ -689,12 +680,6 @@ public class OutboundMessagingConnection
     /*
         methods specific to testing follow
      */
-
-    @VisibleForTesting
-    int backlogSize()
-    {
-        return backlogSize.incrementAndGet();
-    }
 
     @VisibleForTesting
     void addToBacklog(QueuedMessage msg)
@@ -752,6 +737,25 @@ public class OutboundMessagingConnection
 
     public boolean isClosed()
     {
-        return closed;
+        return state.get() == STATE_CONNECTION_CLOSED;
+    }
+
+    void setState(int nextState)
+    {
+        state.set(nextState);
+    }
+
+    int getState()
+    {
+        return state.get();
+    }
+
+    /**
+     * Use only in tests as {@link #backlog} is not guaranteed to have constant-time performance.
+     * Use {@link #getPendingMessages()} instead.
+     */
+    int getBacklogSize()
+    {
+        return backlog.size();
     }
 }

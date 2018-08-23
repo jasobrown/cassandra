@@ -18,8 +18,6 @@
 
 package org.apache.cassandra.net.async;
 
-import java.io.IOException;
-
 import com.google.common.net.InetAddresses;
 import org.junit.Assert;
 import org.junit.Before;
@@ -30,7 +28,6 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
-import io.netty.channel.ChannelPromise;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -211,69 +208,5 @@ public class ChannelWriterTest
         channelWriter.softClose();
         Assert.assertFalse(channel.isOpen());
         Assert.assertTrue(channelWriter.isClosed());
-    }
-
-    @Test
-    public void handleMessagePromise_FutureIsCancelled()
-    {
-        ChannelPromise promise = channel.newPromise();
-        promise.cancel(false);
-        channelWriter.handleMessageFuture(promise, new QueuedMessage(new MessageOut<>(ECHO), 1), true);
-        Assert.assertTrue(channel.isActive());
-        Assert.assertEquals(1, omc.getCompletedMessages().longValue());
-        Assert.assertEquals(0, omc.getDroppedMessages().longValue());
-    }
-
-    @Test
-    public void handleMessagePromise_ExpiredException_DoNotRetryMsg()
-    {
-        ChannelPromise promise = channel.newPromise();
-        promise.setFailure(new ExpiredException());
-
-        channelWriter.handleMessageFuture(promise, new QueuedMessage(new MessageOut<>(ECHO), 1), true);
-        Assert.assertTrue(channel.isActive());
-        Assert.assertEquals(1, omc.getCompletedMessages().longValue());
-        Assert.assertEquals(1, omc.getDroppedMessages().longValue());
-        Assert.assertFalse(omc.sendMessageInvoked);
-    }
-
-    @Test
-    public void handleMessagePromise_NonIOException()
-    {
-        ChannelPromise promise = channel.newPromise();
-        promise.setFailure(new NullPointerException("this is a test"));
-        channelWriter.handleMessageFuture(promise, new QueuedMessage(new MessageOut<>(ECHO), 1), true);
-        Assert.assertTrue(channel.isActive());
-        Assert.assertEquals(1, omc.getCompletedMessages().longValue());
-        Assert.assertEquals(0, omc.getDroppedMessages().longValue());
-        Assert.assertFalse(omc.sendMessageInvoked);
-    }
-
-    @Test
-    public void handleMessagePromise_IOException_ChannelNotClosed_RetryMsg()
-    {
-        ChannelPromise promise = channel.newPromise();
-        promise.setFailure(new IOException("this is a test"));
-        Assert.assertTrue(channel.isActive());
-        channelWriter.handleMessageFuture(promise, new QueuedMessage(new MessageOut<>(ECHO), 1, 0, true, true), true);
-
-        Assert.assertFalse(channel.isActive());
-        Assert.assertEquals(1, omc.getCompletedMessages().longValue());
-        Assert.assertEquals(0, omc.getDroppedMessages().longValue());
-        Assert.assertTrue(omc.sendMessageInvoked);
-    }
-
-    @Test
-    public void handleMessagePromise_Cancelled()
-    {
-        ChannelPromise promise = channel.newPromise();
-        promise.cancel(false);
-        Assert.assertTrue(channel.isActive());
-        channelWriter.handleMessageFuture(promise, new QueuedMessage(new MessageOut<>(ECHO), 1, 0, true, true), true);
-
-        Assert.assertTrue(channel.isActive());
-        Assert.assertEquals(1, omc.getCompletedMessages().longValue());
-        Assert.assertEquals(0, omc.getDroppedMessages().longValue());
-        Assert.assertFalse(omc.sendMessageInvoked);
     }
 }
