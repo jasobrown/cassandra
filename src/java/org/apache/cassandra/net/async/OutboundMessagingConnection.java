@@ -125,8 +125,6 @@ public class OutboundMessagingConnection
      */
     private ScheduledFuture<?> connectionTimeoutFuture;
 
-//    private final AtomicReference<State> state;
-
     private final CoalescingStrategy coalescingStrategy;
 
     // TODO:JEB document me
@@ -149,7 +147,7 @@ public class OutboundMessagingConnection
      */
     private int targetVersion;
 
-    // TODO:JEB doc me -- also, FIX ME !!!!
+    // TODO:JEB doc me -- also, FIX ME !!!!  also, rename me?
     // to protect against concurrent (re-)connect attempts
     private final AtomicInteger state;
 
