@@ -256,7 +256,7 @@ public class OutboundMessagingConnectionTest
 
         OutboundMessagingConnection omc = pool.getConnection(messageOut);
         Assert.assertEquals(STATE_CONNECTION_CREATE_IDLE, omc.getState());
-        Assert.assertFalse(omc.connect());
+        Assert.assertFalse(omc.connect(true));
         Assert.assertFalse(ms.channelManagers.containsKey(REMOTE_ADDR));
     }
 

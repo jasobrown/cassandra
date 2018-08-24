@@ -75,12 +75,17 @@ public class OutboundMessagingConnection
     /**
      * Number of milliseconds between connection createRetry attempts.
      */
-    private static final int OPEN_RETRY_DELAY_MS = 100;
+    private static final int OPEN_RETRY_DELAY_MS = 200;
 
     /**
      * A minimum number of milliseconds to wait for a connection (TCP socket connect + handshake)
      */
     private static final int MINIMUM_CONNECT_TIMEOUT_MS = 2000;
+
+    /**
+     * Some (artificial) max number of time to attempt to connect at a given time.
+     */
+    private static final int MAX_RECONNECT_ATTEMPTS = 10;
 
     // TODO:JEB document me!!
     static final int STATE_CONNECTION_CREATE_IDLE = 0;
@@ -202,6 +207,7 @@ public class OutboundMessagingConnection
         backlogSize.incrementAndGet();
         backlog.add(queuedMessage);
 
+
         if (queueConsumerStateUpdater.compareAndSet(this, QUEUE_CONSUMER_STATE_IDLE, QUEUE_CONSUMER_STATE_ENQUEUED))
             eventLoop.submit(this::maybeStartDequeuing);
 
@@ -212,11 +218,16 @@ public class OutboundMessagingConnection
     // TODO:JEB doc me, but this should only execute on the event loop
     boolean maybeStartDequeuing()
     {
+//        logger.debug("JEB::OMC::maybeStartDequeuing HEAD state = {}, queuState = {}", state, queueConsumerState);
         if (isClosed() || backlog.isEmpty())
+        {
+//            queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
             return false;
+        }
 
         if (channelWriter == null || channelWriter.isClosed())
         {
+//            queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
             reconnect();
             return false;
         }
@@ -230,6 +241,7 @@ public class OutboundMessagingConnection
     // TODO:JEB doc me, but assumes a) we're on the event loop, b) channel/channelWriter are set up, c) state == QUEUE_CONSUMER_STATE_RUNNING
     private boolean dequeueMessage()
     {
+//        logger.debug("JEB::OMC::dequeueMessage HEAD state = {}, queuState = {}", state, queueConsumerState);
         if (isClosed() || !channelWriter.channel.isWritable())
             return false;
 
@@ -260,13 +272,14 @@ public class OutboundMessagingConnection
      * <p>
      * Note: this should only be invoked on the event loop.
      */
-    boolean connect()
+    boolean connect(boolean cancelTimeout)
     {
+//        logger.debug("JEB::OMC::connect HEAD - state = {}, queuState = {}", state, queueConsumerState);
         if (isClosed())
             return false;
 
         // clean up any lingering connection attempts
-        cleanupConnectionFutures();
+        cleanupConnectionFutures(cancelTimeout);
 
         logger.debug("connection attempt {} to {}", connectAttemptCount, connectionId);
 
@@ -289,7 +302,9 @@ public class OutboundMessagingConnection
         connectFuture.addListener(this::connectCallback);
 
         long timeout = Math.max(MINIMUM_CONNECT_TIMEOUT_MS, DatabaseDescriptor.getRpcTimeout());
-        connectionTimeoutFuture = eventLoop.schedule(() -> connectionTimeout(connectFuture), timeout, TimeUnit.MILLISECONDS);
+
+        if (connectionTimeoutFuture == null || connectionTimeoutFuture.isDone())
+            connectionTimeoutFuture = eventLoop.schedule(() -> connectionTimeout(connectFuture), timeout, TimeUnit.MILLISECONDS);
         return true;
     }
 
@@ -393,17 +408,26 @@ public class OutboundMessagingConnection
 
         if (cause instanceof IOException)
         {
-            if (logger.isTraceEnabled())
-                logger.trace("unable to connect on attempt {} to {}", connectAttemptCount, connectionId, cause);
-            connectAttemptCount++;
-            connectionRetryFuture = eventLoop.schedule(this::connect, OPEN_RETRY_DELAY_MS * connectAttemptCount, TimeUnit.MILLISECONDS);
+//            if (logger.isTraceEnabled())
+                logger.debug("unable to connect on attempt {} to {}", connectAttemptCount, connectionId, cause);
+
+            if (connectAttemptCount < MAX_RECONNECT_ATTEMPTS)
+            {
+                connectAttemptCount++;
+                connectionRetryFuture = eventLoop.schedule(() -> connect(false), OPEN_RETRY_DELAY_MS * connectAttemptCount, TimeUnit.MILLISECONDS);
+            }
+            else
+            {
+                setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
+            }
         }
         else
         {
             JVMStabilityInspector.inspectThrowable(cause);
             logger.error("non-IO error attempting to connect to {}", connectionId, cause);
-            cleanupConnectionFutures();
+            cleanupConnectionFutures(true);
             setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
+            queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
         }
         return false;
     }
@@ -417,7 +441,8 @@ public class OutboundMessagingConnection
      */
     boolean connectionTimeout(ChannelFuture channelFuture)
     {
-        cleanupConnectionFutures();
+//        logger.debug("JEB::OMC::connectionTimeout triggered");
+        cleanupConnectionFutures(true);
         connectAttemptCount = 0;
         if (isClosed())
             return false;
@@ -425,9 +450,10 @@ public class OutboundMessagingConnection
         if (logger.isDebugEnabled())
             logger.debug("timed out while trying to connect to {}", connectionId);
 
+        setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
+        queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
         channelFuture.channel().close();
         purgeBacklog();
-        setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
         return true;
     }
 
@@ -439,7 +465,7 @@ public class OutboundMessagingConnection
     void finishHandshake(HandshakeResult result)
     {
         // clean up the connector instances before changing the state
-        cleanupConnectionFutures();
+        cleanupConnectionFutures(true);
         connectAttemptCount = 0;
 
         if (result.negotiatedMessagingVersion != HandshakeResult.UNKNOWN_PROTOCOL_VERSION)
@@ -486,9 +512,9 @@ public class OutboundMessagingConnection
     /**
      * Note: This will execute on the event loop
      */
-    private void cleanupConnectionFutures()
+    private void cleanupConnectionFutures(boolean cancelTimeout)
     {
-        if (connectionTimeoutFuture != null)
+        if (cancelTimeout && connectionTimeoutFuture != null)
         {
             connectionTimeoutFuture.cancel(false);
             connectionTimeoutFuture = null;
@@ -549,6 +575,8 @@ public class OutboundMessagingConnection
             if (channelWriter.shouldPurgeBacklog())
                 purgeBacklog();
 
+            queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
+
             // This writer needs to be closed and we need to trigger a reconnection. We really only want to do that
             // once for this channel however (and again, no race because we're on the netty event loop).
             if (!channelWriter.isClosed())
@@ -596,14 +624,14 @@ public class OutboundMessagingConnection
     }
 
     /**
-     * Schedule {@link #connect()} to attempt to reconnect.
+     * Schedule {@link #connect(boolean)} to attempt to reconnect.
      *
      * @return A future is this thread won a race to kick off the connect process; else, null.
      */
     Future<?> reconnect()
     {
         if (state.compareAndSet(STATE_CONNECTION_CREATE_IDLE, STATE_CONNECTION_CREATE_RUNNING))
-            return eventLoop.submit(this::connect);
+            return eventLoop.submit(() -> connect(true));
 
         // TODO:JEB fix this
         return null;
@@ -611,7 +639,9 @@ public class OutboundMessagingConnection
 
     void purgeBacklog()
     {
-        backlogSize.set(0);
+//        logger.debug("JEB::OMC::purgeBacklog", new Exception("JEB dump stack on purge"));
+        int droppedCount = backlogSize.getAndSet(0);
+        droppedMessageCount.addAndGet(droppedCount);
         backlog.clear();
     }
 
@@ -622,11 +652,12 @@ public class OutboundMessagingConnection
      */
     public void close(boolean softClose)
     {
+//        logger.debug("JEB::OMC::close triggered for {}, softCLose= {}", connectionId, softClose);
         if (isClosed())
             return;
 
-        state.set(STATE_CONNECTION_CLOSED);
-        cleanupConnectionFutures();
+
+        cleanupConnectionFutures(true);
 
         // drain the backlog
         if (channelWriter != null)
@@ -637,6 +668,8 @@ public class OutboundMessagingConnection
             }
             else
             {
+                // TODO:JEB rethink this one
+//                state.set(STATE_CONNECTION_CLOSED);
                 purgeBacklog();
                 channelWriter.close();
             }
