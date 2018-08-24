@@ -223,7 +223,8 @@ public class OutboundMessagingConnectionTest
 
         omc.close(softClose);
         Assert.assertFalse(channel.isActive());
-        Assert.assertEquals(STATE_CONNECTION_CLOSED, omc.getState());
+        if (!softClose)
+            Assert.assertEquals(STATE_CONNECTION_CLOSED, omc.getState());
         assertBacklogSizes(softClose ? count : 0);
         Assert.assertTrue(connectionTimeoutFuture.isCancelled());
         Assert.assertTrue(channelWriter.isClosed());

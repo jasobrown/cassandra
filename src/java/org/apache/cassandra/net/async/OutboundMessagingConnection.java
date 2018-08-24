@@ -219,15 +219,19 @@ public class OutboundMessagingConnection
     boolean maybeStartDequeuing()
     {
 //        logger.debug("JEB::OMC::maybeStartDequeuing HEAD state = {}, queuState = {}", state, queueConsumerState);
-        if (isClosed() || backlog.isEmpty())
+        if (isClosed())
+            return false;
+
+        if (backlog.isEmpty())
         {
-//            queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
+            queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
             return false;
         }
 
         if (channelWriter == null || channelWriter.isClosed())
         {
-//            queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
+            // note: do not change queueConsumerState here else a producer thread could inadvertently schedule another
+            // task, which would attempt to connect, as well, and so on
             reconnect();
             return false;
         }
@@ -245,11 +249,12 @@ public class OutboundMessagingConnection
         if (isClosed() || !channelWriter.channel.isWritable())
             return false;
 
-        while (true)
+        boolean messageSent = false;
+        while (!messageSent)
         {
             QueuedMessage next = backlog.poll();
             if (next == null)
-                return false;
+                break;
 
             backlogSize.decrementAndGet();
 
@@ -260,8 +265,16 @@ public class OutboundMessagingConnection
             }
 
             channelWriter.write(next).addListener(future -> handleMessageResult(next, future));
-            return true;
+            messageSent = true;
         }
+
+        // note: we have to set the state back to IDLE if we did not send a message to channelWriter,
+        // because there's no other component that will do it. handleMessageResult() sets the state correctly
+        // when a message *is* written to the channleWriter
+        if (!messageSent)
+            queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
+
+        return messageSent;
     }
 
     /**
@@ -569,18 +582,20 @@ public class OutboundMessagingConnection
         }
 
         JVMStabilityInspector.inspectThrowable(cause);
+        queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
 
+        // TODO::JEB not a fan of this extra flag
+        boolean reconnected = false;
         if (cause instanceof IOException || cause.getCause() instanceof IOException)
         {
             if (channelWriter.shouldPurgeBacklog())
                 purgeBacklog();
 
-            queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
-
             // This writer needs to be closed and we need to trigger a reconnection. We really only want to do that
             // once for this channel however (and again, no race because we're on the netty event loop).
             if (!channelWriter.isClosed())
             {
+                reconnected = true;
                 reconnect();
                 channelWriter.close();
             }
@@ -599,6 +614,9 @@ public class OutboundMessagingConnection
             // Non IO exceptions are likely a programming error so let's not silence them
             logger.error("Unexpected error writing on " + connectionId, cause);
         }
+
+        if (!reconnected && !backlog.isEmpty() && queueConsumerStateUpdater.compareAndSet(this, QUEUE_CONSUMER_STATE_IDLE, QUEUE_CONSUMER_STATE_ENQUEUED))
+            dequeueMessage();
     }
 
     /**
@@ -652,10 +670,8 @@ public class OutboundMessagingConnection
      */
     public void close(boolean softClose)
     {
-//        logger.debug("JEB::OMC::close triggered for {}, softCLose= {}", connectionId, softClose);
         if (isClosed())
             return;
-
 
         cleanupConnectionFutures(true);
 
@@ -668,12 +684,13 @@ public class OutboundMessagingConnection
             }
             else
             {
-                // TODO:JEB rethink this one
-//                state.set(STATE_CONNECTION_CLOSED);
                 purgeBacklog();
                 channelWriter.close();
             }
         }
+
+        if (!softClose)
+            state.set(STATE_CONNECTION_CLOSED);
     }
 
     @Override
