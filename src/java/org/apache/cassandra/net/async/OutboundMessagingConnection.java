@@ -156,12 +156,9 @@ public class OutboundMessagingConnection
     // to protect against concurrent (re-)connect attempts
     private final AtomicInteger state;
 
-
     // TODO:JEB doc me
     private volatile int queueConsumerState;
     private static final AtomicIntegerFieldUpdater<OutboundMessagingConnection> queueConsumerStateUpdater = AtomicIntegerFieldUpdater.newUpdater(OutboundMessagingConnection.class, "queueConsumerState");
-
-
 
     OutboundMessagingConnection(OutboundConnectionIdentifier connectionId,
                                 ServerEncryptionOptions encryptionOptions,
@@ -191,11 +188,15 @@ public class OutboundMessagingConnection
         targetVersion = MessagingService.instance().getVersion(connectionId.remote());
     }
 
+    private String loggingTag()
+    {
+        ChannelWriter writer = channelWriter;
+        String channelId = writer != null ? writer.channel.id().asShortText() : "[no-channel]";
+        return connectionId.remote() + "-" + connectionId.type() + "-" + channelId;
+    }
+
     boolean sendMessage(MessageOut msg, int id)
     {
-        if (isClosed())
-            return false;
-
         return sendMessage(new QueuedMessage(msg, id));
     }
 
@@ -207,7 +208,6 @@ public class OutboundMessagingConnection
         backlogSize.incrementAndGet();
         backlog.add(queuedMessage);
 
-
         if (queueConsumerStateUpdater.compareAndSet(this, QUEUE_CONSUMER_STATE_IDLE, QUEUE_CONSUMER_STATE_ENQUEUED))
             eventLoop.submit(this::maybeStartDequeuing);
 
@@ -218,7 +218,6 @@ public class OutboundMessagingConnection
     // TODO:JEB doc me, but this should only execute on the event loop
     boolean maybeStartDequeuing()
     {
-//        logger.debug("JEB::OMC::maybeStartDequeuing HEAD state = {}, queuState = {}", state, queueConsumerState);
         if (isClosed())
             return false;
 
@@ -243,10 +242,11 @@ public class OutboundMessagingConnection
     }
 
     // TODO:JEB doc me, but assumes a) we're on the event loop, b) channel/channelWriter are set up, c) state == QUEUE_CONSUMER_STATE_RUNNING
+    //, and d) not closed
     private boolean dequeueMessage()
     {
-//        logger.debug("JEB::OMC::dequeueMessage HEAD state = {}, queuState = {}", state, queueConsumerState);
-        if (isClosed() || !channelWriter.channel.isWritable())
+        logger.debug("{} JEB::OMC::dequeueMessage HEAD state = {}, queueState = {}", loggingTag(), state, queueConsumerState);
+        if (!channelWriter.channel.isWritable())
             return false;
 
         boolean messageSent = false;
@@ -258,19 +258,22 @@ public class OutboundMessagingConnection
 
             backlogSize.decrementAndGet();
 
-            if (next.isTimedOut())
+            if (!next.isTimedOut())
+            {
+                logger.debug("{} JEB::OMC::dequeueMessage - channel {} sending message {}", loggingTag(), connectionId.type(), next);
+                channelWriter.write(next).addListener(future -> handleMessageResult(next, future));
+                messageSent = true;
+            }
+            else
             {
                 droppedMessageCount.incrementAndGet();
-                continue;
             }
-
-            channelWriter.write(next).addListener(future -> handleMessageResult(next, future));
-            messageSent = true;
         }
 
         // note: we have to set the state back to IDLE if we did not send a message to channelWriter,
         // because there's no other component that will do it. handleMessageResult() sets the state correctly
         // when a message *is* written to the channleWriter
+        // TODO:JEB i might need Nitesh's check here
         if (!messageSent)
             queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
 
@@ -287,19 +290,20 @@ public class OutboundMessagingConnection
      */
     boolean connect(boolean cancelTimeout)
     {
-//        logger.debug("JEB::OMC::connect HEAD - state = {}, queuState = {}", state, queueConsumerState);
+        logger.debug("{} JEB::OMC::connect HEAD - state = {}, queuState = {}", loggingTag(), state, queueConsumerState);
+
+        // clean up any lingering connection attempts
+        cleanupConnectArtifacts(cancelTimeout);
+
         if (isClosed())
             return false;
 
-        // clean up any lingering connection attempts
-        cleanupConnectionFutures(cancelTimeout);
-
-        logger.debug("connection attempt {} to {}", connectAttemptCount, connectionId);
+        logger.debug("{} connection attempt {}", loggingTag(), connectAttemptCount);
 
         InetAddressAndPort remote = connectionId.remote();
         if (!authenticator.authenticate(remote.address, remote.port))
         {
-            logger.warn("Internode auth failed connecting to {}", connectionId);
+            logger.warn("{} Internode auth failed", loggingTag());
             //Remove the connection pool and other thread so messages aren't queued
             MessagingService.instance().destroyConnectionPool(remote);
 
@@ -348,7 +352,8 @@ public class OutboundMessagingConnection
                 targetVersion = version;
                 int port = MessagingService.instance().portFor(connectionId.remote());
                 connectionId = connectionId.withNewConnectionPort(port);
-                logger.debug("changing connectionId to {}, with a different port for secure communication, because peer version is {}", connectionId, version);
+                logger.debug("{} changing connectionId to {}, with a different port for secure communication, because peer version is {}",
+                             loggingTag(), connectionId, version);
             }
         }
     }
@@ -405,6 +410,7 @@ public class OutboundMessagingConnection
         // make sure this instance is not (terminally) closed
         if (isClosed())
         {
+            // we don't have a ChannelWriter just yet, so we have to go directly to the future's channel to close it
             channelFuture.channel().close();
             return false;
         }
@@ -414,15 +420,12 @@ public class OutboundMessagingConnection
         // this is the success state
         final Throwable cause = future.cause();
         if (cause == null)
-        {
-            connectAttemptCount = 0;
             return true;
-        }
 
         if (cause instanceof IOException)
         {
-//            if (logger.isTraceEnabled())
-                logger.debug("unable to connect on attempt {} to {}", connectAttemptCount, connectionId, cause);
+            if (logger.isTraceEnabled())
+                logger.trace("{} unable to connect on attempt {}", loggingTag(), connectAttemptCount, cause);
 
             if (connectAttemptCount < MAX_RECONNECT_ATTEMPTS)
             {
@@ -437,8 +440,8 @@ public class OutboundMessagingConnection
         else
         {
             JVMStabilityInspector.inspectThrowable(cause);
-            logger.error("non-IO error attempting to connect to {}", connectionId, cause);
-            cleanupConnectionFutures(true);
+            logger.error("{} non-IO error attempting to connect", loggingTag(), cause);
+            cleanupConnectArtifacts(true);
             setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
             queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
         }
@@ -454,14 +457,13 @@ public class OutboundMessagingConnection
      */
     boolean connectionTimeout(ChannelFuture channelFuture)
     {
-//        logger.debug("JEB::OMC::connectionTimeout triggered");
-        cleanupConnectionFutures(true);
-        connectAttemptCount = 0;
+        logger.debug("{} JEB::OMC::connectionTimeout triggered", loggingTag());
+        cleanupConnectArtifacts(true);
         if (isClosed())
             return false;
 
         if (logger.isDebugEnabled())
-            logger.debug("timed out while trying to connect to {}", connectionId);
+            logger.debug("{} timed out while trying to connect", loggingTag());
 
         setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
         queueConsumerStateUpdater.set(this, QUEUE_CONSUMER_STATE_IDLE);
@@ -471,15 +473,16 @@ public class OutboundMessagingConnection
     }
 
     /**
-     * Process the results of the handshake negotiation.
+     * Process the results of the handshake negotiation. This should only be invoked after {@link #connectCallback(Future)}
+     * has successfully be invoked (as we need the TCP connection to be properly established before any
+     * application messages can be sent).
      * <p>
      * Note: this method will be invoked from the netty event loop.
      */
     void finishHandshake(HandshakeResult result)
     {
         // clean up the connector instances before changing the state
-        cleanupConnectionFutures(true);
-        connectAttemptCount = 0;
+        cleanupConnectArtifacts(true);
 
         if (result.negotiatedMessagingVersion != HandshakeResult.UNKNOWN_PROTOCOL_VERSION)
         {
@@ -495,19 +498,20 @@ public class OutboundMessagingConnection
                 if (isClosed() || result.channelWriter.isClosed())
                 {
                     result.channelWriter.close();
+                    setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
                     purgeBacklog();
                     break;
                 }
 
                 if (logger.isDebugEnabled())
                 {
-                    logger.debug("successfully connected to {}, compress = {}, coalescing = {}", connectionId,
+                    logger.debug("{} successfully connected, compress = {}, coalescing = {}", loggingTag(),
                                  shouldCompressConnection(connectionId.local(), connectionId.remote()),
                                  coalescingStrategy != null ? coalescingStrategy : CoalescingStrategies.Strategy.DISABLED);
                 }
                 channelWriter = result.channelWriter;
-                maybeStartDequeuing();
                 setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
+                maybeStartDequeuing();
                 break;
             case DISCONNECT:
                 setStateIfNotClosed(state, STATE_CONNECTION_CREATE_IDLE);
@@ -523,14 +527,22 @@ public class OutboundMessagingConnection
     }
 
     /**
+     * Cleanup member fields used when connecting to a peer.
+     *
      * Note: This will execute on the event loop
      */
-    private void cleanupConnectionFutures(boolean cancelTimeout)
+    private void cleanupConnectArtifacts(boolean resetConnectTimeout)
     {
-        if (cancelTimeout && connectionTimeoutFuture != null)
+        if (resetConnectTimeout)
         {
-            connectionTimeoutFuture.cancel(false);
-            connectionTimeoutFuture = null;
+            if (connectionTimeoutFuture != null)
+            {
+                connectionTimeoutFuture.cancel(false);
+                connectionTimeoutFuture = null;
+            }
+
+            if (resetConnectTimeout)
+                connectAttemptCount = 0;
         }
 
         if (connectionRetryFuture != null)
@@ -557,7 +569,7 @@ public class OutboundMessagingConnection
     /**
      * Handles the result of each message sent.
      *
-     * // TODO:JEB this will not be invoked on the event loop in the case of large messages
+     * // TODO:JEB this will not be invoked on the event loop in the case of large messages (CASSANDRA-13630)
      * Note: this function is expected to be invoked on the netty event loop. Also, do not retain any state from
      * the input {@code messageResult}.
      */
@@ -612,7 +624,7 @@ public class OutboundMessagingConnection
         else
         {
             // Non IO exceptions are likely a programming error so let's not silence them
-            logger.error("Unexpected error writing on " + connectionId, cause);
+            logger.error("{} Unexpected error writing", loggingTag(), cause);
         }
 
         if (!reconnected && !backlog.isEmpty() && queueConsumerStateUpdater.compareAndSet(this, QUEUE_CONSUMER_STATE_IDLE, QUEUE_CONSUMER_STATE_ENQUEUED))
@@ -624,6 +636,8 @@ public class OutboundMessagingConnection
      * was a previous connection, and new incoming messages as well as existing {@link #backlog} messages will be sent there.
      * Any outstanding messages in the existing channel will still be sent to the previous address (we won't/can't move them from
      * one channel to another).
+     *
+     * Note: this will not be invoked on the event loop.
      */
     void reconnectWithNewIp(InetAddressAndPort newAddr)
     {
@@ -657,7 +671,7 @@ public class OutboundMessagingConnection
 
     void purgeBacklog()
     {
-//        logger.debug("JEB::OMC::purgeBacklog", new Exception("JEB dump stack on purge"));
+        logger.debug("{} JEB::OMC::purgeBacklog", loggingTag(), new Exception("JEB dump stack on purge"));
         int droppedCount = backlogSize.getAndSet(0);
         droppedMessageCount.addAndGet(droppedCount);
         backlog.clear();
@@ -673,7 +687,7 @@ public class OutboundMessagingConnection
         if (isClosed())
             return;
 
-        cleanupConnectionFutures(true);
+        cleanupConnectArtifacts(true);
 
         // drain the backlog
         if (channelWriter != null)
