@@ -460,7 +460,7 @@ public class OutboundMessagingConnectionTest
     public void setState_CREATING_CONNECTION()
     {
         Assert.assertTrue(isValidTransition(STATE_CREATING_CONNECTION, STATE_IDLE));
-        Assert.assertFalse(isValidTransition(STATE_CREATING_CONNECTION, STATE_CONSUME_ENQUEUED));
+        Assert.assertTrue(isValidTransition(STATE_CREATING_CONNECTION, STATE_CONSUME_ENQUEUED));
         Assert.assertFalse(isValidTransition(STATE_CREATING_CONNECTION, STATE_CONSUME_RUNNING));
         Assert.assertTrue(isValidTransition(STATE_CREATING_CONNECTION, STATE_CREATING_CONNECTION));
         Assert.assertTrue(isValidTransition(STATE_CREATING_CONNECTION, STATE_CLOSED));

@@ -87,6 +87,8 @@ public class MessageDeliveryTask implements Runnable
             return false;
         }
 
+        logger.debug("JEB::MDT::process, from = {}, verb = {}, id = {}", message.from, verb, id);
+
         try
         {
             verbHandler.doVerb(message, id);

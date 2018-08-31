@@ -86,12 +86,20 @@ public abstract class BaseMessageInHandler extends ByteToMessageDecoder
     final int messagingVersion;
 
     protected State state;
+    private String loggingTag;
 
     public BaseMessageInHandler(InetAddressAndPort peer, int messagingVersion, BiConsumer<MessageIn, Integer> messageConsumer)
     {
         this.peer = peer;
         this.messagingVersion = messagingVersion;
         this.messageConsumer = messageConsumer;
+    }
+
+    @Override
+    public void handlerAdded(final ChannelHandlerContext ctx)
+    {
+        loggingTag = peer + "-" + ctx.channel().id();
+        logger.debug("{} JEB::MIH::handlerAdded()", loggingTag);
     }
 
     // redeclared here to make the method public (for testing)

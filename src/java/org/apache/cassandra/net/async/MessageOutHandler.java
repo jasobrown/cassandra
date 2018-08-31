@@ -61,7 +61,7 @@ import static org.apache.cassandra.config.Config.PROPERTY_PREFIX;
  */
 class MessageOutHandler extends ChannelDuplexHandler
 {
-    private static final Logger logger = LoggerFactory.getLogger(MessageOutHandler.class);
+        private static final Logger logger = LoggerFactory.getLogger(MessageOutHandler.class);
     private static final NoSpamLogger errorLogger = NoSpamLogger.getLogger(logger, 1, TimeUnit.SECONDS);
 
     /**
@@ -92,6 +92,7 @@ class MessageOutHandler extends ChannelDuplexHandler
 
     private final ChannelWriter channelWriter;
 
+    private String loggingTag;
 
     MessageOutHandler(OutboundConnectionIdentifier connectionId, int targetMessagingVersion, ChannelWriter channelWriter)
     {
@@ -107,6 +108,13 @@ class MessageOutHandler extends ChannelDuplexHandler
     }
 
     @Override
+    public void handlerAdded(final ChannelHandlerContext ctx)
+    {
+        loggingTag = connectionId.remote() + "-" + connectionId.type() + "-" + ctx.channel().id();
+        logger.debug("{} JEB::MOH::handlerAdded()", loggingTag);
+    }
+
+    @Override
     public void write(ChannelHandlerContext ctx, Object o, ChannelPromise promise)
     {
         // this was a temporary fix until https://github.com/netty/netty/pull/6867 was released (probably netty 4.1.13).
@@ -114,7 +122,7 @@ class MessageOutHandler extends ChannelDuplexHandler
         // the channel handlers are removed from the channel potentially async from the close operation.
         if (!ctx.channel().isOpen())
         {
-            logger.debug("attempting to process a message in the pipeline, but channel {} is closed", ctx.channel().id());
+            logger.debug("{} attempting to process a message in the pipeline, but channel is closed", loggingTag);
             promise.tryFailure(new ClosedChannelException());
             return;
         }
@@ -138,7 +146,7 @@ class MessageOutHandler extends ChannelDuplexHandler
             long currentFrameSize = MESSAGE_PREFIX_SIZE + msg.message.serializedSize(targetMessagingVersion);
             if (currentFrameSize > Integer.MAX_VALUE || currentFrameSize < 0)
             {
-                promise.tryFailure(new IllegalStateException(String.format("%s illegal frame size: %d, ignoring message", connectionId, currentFrameSize)));
+                promise.tryFailure(new IllegalStateException(String.format("%s illegal frame size: %d, ignoring message", loggingTag, currentFrameSize)));
                 return;
             }
 
@@ -163,7 +171,7 @@ class MessageOutHandler extends ChannelDuplexHandler
         finally
         {
             // Make sure we signal the outChanel even in case of errors.
-            channelWriter.onMessageProcessed(ctx);
+//            channelWriter.onMessageProcessed(ctx);
         }
     }
 
@@ -199,7 +207,7 @@ class MessageOutHandler extends ChannelDuplexHandler
         }
         catch (Exception e)
         {
-            logger.warn("{} failed to capture the tracing info for an outbound message, ignoring", connectionId, e);
+            logger.warn("{} failed to capture the tracing info for an outbound message, ignoring", loggingTag, e);
         }
     }
 
@@ -220,15 +228,14 @@ class MessageOutHandler extends ChannelDuplexHandler
         // if we allocated to little buffer space, we would have hit an exception when trying to write more bytes to it
         if (out.isWritable())
             errorLogger.error("{} reported message size {}, actual message size {}, msg {}",
-                         connectionId, out.capacity(), out.writerIndex(), msg.message);
+                         loggingTag, out.capacity(), out.writerIndex(), msg.message);
     }
 
-    @Override
-    public void flush(ChannelHandlerContext ctx)
-    {
-        channelWriter.onTriggeredFlush(ctx);
-    }
-
+//    @Override
+//    public void flush(ChannelHandlerContext ctx)
+//    {
+//        channelWriter.onTriggeredFlush(ctx);
+//    }
 
     /**
      * {@inheritDoc}
@@ -248,6 +255,8 @@ class MessageOutHandler extends ChannelDuplexHandler
             ChannelOutboundBuffer cob = ctx.channel().unsafe().outboundBuffer();
             if (cob != null && cob.totalPendingWriteBytes() > 0)
             {
+                logger.debug("{} JEB::MOH::userEventTriggered() IDLE STATE, cob.totalPendingWriteBytes() = {}",
+                             loggingTag, cob.totalPendingWriteBytes());
                 ctx.channel().attr(ChannelWriter.PURGE_MESSAGES_CHANNEL_ATTR)
                    .compareAndSet(Boolean.FALSE, Boolean.TRUE);
                 ctx.close();
@@ -258,6 +267,7 @@ class MessageOutHandler extends ChannelDuplexHandler
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
     {
+        logger.debug("{} JEB::MOH::exceptionCaught()", loggingTag);
         if (cause instanceof IOException)
             logger.trace("{} io error", connectionId, cause);
         else
@@ -269,6 +279,7 @@ class MessageOutHandler extends ChannelDuplexHandler
     @Override
     public void close(ChannelHandlerContext ctx, ChannelPromise promise)
     {
+        logger.debug("{} JEB::MOH::close()", loggingTag);
         ctx.flush();
         ctx.close(promise);
     }

@@ -25,6 +25,9 @@ import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -127,6 +130,7 @@ import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
  */
 abstract class ChannelWriter
 {
+    private static final Logger logger = LoggerFactory.getLogger(ChannelWriter.class);
     /**
      * A netty channel {@link Attribute} to indicate, when a channel is closed, any backlogged messages should be purged,
      * as well. See the class-level documentation for more information.
@@ -208,12 +212,12 @@ abstract class ChannelWriter
      */
     abstract void onMessageProcessed(ChannelHandlerContext ctx);
 
-    /**
-     * Invoked when pipeline receives a flush request.
-     * <p>
-     * Note: this method is invoked on the netty event loop.
-     */
-    abstract void onTriggeredFlush(ChannelHandlerContext ctx);
+//    /**
+//     * Invoked when pipeline receives a flush request.
+//     * <p>
+//     * Note: this method is invoked on the netty event loop.
+//     */
+//    abstract void onTriggeredFlush(ChannelHandlerContext ctx);
 
     /**
      * Handles the non-coalescing flush case.
@@ -233,19 +237,25 @@ abstract class ChannelWriter
             // flush, though, because onTriggeredFlush, which MessageOutHandler delegates to, does nothing. We will
             // flush after the message is processed though if there is no pending one due to onMessageProcessed.
             // See the class javadoc for context and much more details.
-            return channel.writeAndFlush(message);
+
+            // TODO:JEB as we're on the event loop, we don't have to worry about the extra flush call here
+            return channel.write(message);
         }
 
         void onMessageProcessed(ChannelHandlerContext ctx)
         {
-            if (pendingMessageCountSupplier.get() == 0)
+            int count = pendingMessageCountSupplier.get();
+            logger.debug("{} JEB::CW::simple.onMessageProcessed count = {}", channel.id(), count);
+            if (count == 0)
                 ctx.flush();
+            else
+                logger.debug("JEB::CW::simple.onMessageProcessed - did not flush", new Exception("JEB dump stack"));
         }
 
-        void onTriggeredFlush(ChannelHandlerContext ctx)
-        {
-            // Don't actually flush on "normal" flush calls to the channel.
-        }
+//        void onTriggeredFlush(ChannelHandlerContext ctx)
+//        {
+//            // Don't actually flush on "normal" flush calls to the channel.
+//        }
     }
 
     /**

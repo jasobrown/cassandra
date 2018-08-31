@@ -170,12 +170,15 @@ public class OutboundMessagingConnection
         // In that case we won't rely on that targetVersion before we're actually connected and so the version
         // detection in connect() will do its job.
         targetVersion = MessagingService.instance().getVersion(connectionId.remote());
+        logger.debug("{} JEB::OMC::ctor END", loggingTag());
     }
 
     private String loggingTag()
     {
         ChannelWriter writer = channelWriter;
-        String channelId = writer != null ? writer.channel.id().asShortText() : "[no-channel]";
+        String channelId = writer != null && !writer.isClosed()
+                           ? writer.channel.id().asShortText()
+                           : "[no-channel]";
         return connectionId.remote() + "-" + connectionId.type() + "-" + channelId;
     }
 
@@ -192,6 +195,8 @@ public class OutboundMessagingConnection
         backlogSize.incrementAndGet();
         backlog.add(queuedMessage);
 
+        logger.debug("{} JEB::OMC::sendMessage HEAD state = {}, backlog.size() = {}, backlogSize = {}, msg = {}",
+                     loggingTag(), state, backlog.size(), backlogSize, queuedMessage);
         if (state.set(State.STATE_IDLE, State.STATE_CONSUME_ENQUEUED))
             eventLoop.submit(this::maybeStartDequeuing);
 
@@ -202,6 +207,8 @@ public class OutboundMessagingConnection
     // TODO:JEB doc me, but this should only execute on the event loop
     boolean maybeStartDequeuing()
     {
+        logger.debug("{} JEB::OMC::maybeStartDequeuing HEAD state = {}, backlog.size() = {}, backlogSize = {}",
+                     loggingTag(), state, backlog.size(), backlogSize);
         if (isClosed())
             return false;
 
@@ -211,11 +218,11 @@ public class OutboundMessagingConnection
             return false;
         }
 
+        // TODO:JEB THIS IS A OTHER PROBLEM - checking id cW is null
         if (channelWriter == null || channelWriter.isClosed())
         {
-            // note: do not change queueConsumerState here else a producer thread could inadvertently schedule another
-            // task, which would attempt to connect, as well, and so on
-            reconnect();
+            if (state.set(State.STATE_IDLE))
+                reconnect();
             return false;
         }
 
@@ -229,13 +236,23 @@ public class OutboundMessagingConnection
     //, and d) not closed
     private boolean dequeueMessage()
     {
-//        logger.debug("{} JEB::OMC::dequeueMessage HEAD state = {}, state = {}", loggingTag(), state);
-        if (!channelWriter.channel.isWritable())
-            return false;
+//        logger.debug("{} JEB::OMC::dequeueMessage HEAD state = {}, backlog.size() = {}, backlogSize = {}",
+//                     loggingTag(), state, backlog.size(), backlogSize);
 
         boolean messageSent = false;
-        while (!messageSent)
+        while (true)
         {
+            if (!channelWriter.channel.isWritable())
+            {
+                // note: we have to set the state back to IDLE if we did not send a message to channelWriter,
+                // because there's no other component that will do it. handleMessageResult() sets the state correctly
+                // when a message *is* written to the channleWriter
+                // TODO:JEB i might need Nitesh's check here
+//                state.set(State.STATE_IDLE);
+//                return false;
+                break;
+            }
+
             QueuedMessage next = backlog.poll();
             if (next == null)
                 break;
@@ -244,9 +261,23 @@ public class OutboundMessagingConnection
 
             if (!next.isTimedOut())
             {
-//                logger.debug("{} JEB::OMC::dequeueMessage - channel {} sending message {}", loggingTag(), connectionId.type(), next);
+                logger.debug("{} JEB::OMC::dequeueMessage - sending message {}, backlogSize = {}", loggingTag(), next, backlogSize);
                 channelWriter.write(next).addListener(future -> handleMessageResult(next, future));
                 messageSent = true;
+
+
+
+                // TODO:JEB  **IF** the write is executed within this method call, then we can do the flush check here!!!!
+                // without having to pass some fucked up callback into CW
+
+                // assumes "simple CW" for now ... insert a "flush strategy" thingy here
+                if (backlogSize.decrementAndGet() == 0)
+                {
+                    channelWriter.channel.flush();
+                    // TODO:JEB should i break here???? probably don't have to
+                    // ... but gonna just to make my head not hurt wrt nested callback stack
+                    break;
+                }
             }
             else
             {
@@ -274,8 +305,6 @@ public class OutboundMessagingConnection
      */
     boolean connect(boolean cancelTimeout)
     {
-//        logger.debug("{} JEB::OMC::connect HEAD - state = {}", loggingTag(), state);
-
         // clean up any lingering connection attempts
         cleanupConnectArtifacts(cancelTimeout);
 
@@ -438,7 +467,7 @@ public class OutboundMessagingConnection
      */
     boolean connectionTimeout(ChannelFuture channelFuture)
     {
-//        logger.debug("{} JEB::OMC::connectionTimeout triggered", loggingTag());
+        logger.debug("{} JEB::OMC::connectionTimeout triggered", loggingTag());
         cleanupConnectArtifacts(true);
         if (isClosed())
             return false;
@@ -489,9 +518,17 @@ public class OutboundMessagingConnection
                                  shouldCompressConnection(connectionId.local(), connectionId.remote()),
                                  coalescingStrategy != null ? coalescingStrategy : CoalescingStrategies.Strategy.DISABLED);
                 }
+                logger.debug("{} JEB::OMC::finishHandshake SUCCESS state = {}", loggingTag(), state);
                 channelWriter = result.channelWriter;
-                state.set(State.STATE_IDLE);
-                maybeStartDequeuing();
+                if (state.set(State.STATE_CONSUME_ENQUEUED))
+                {
+                    logger.debug("{} JEB::OMC::finishHandshake set state to {}", loggingTag(), state);
+                    maybeStartDequeuing();
+                }
+                else
+                {
+                    logger.debug("{} JEB::OMC::finishHandshake failed to set state, state = {}", loggingTag(), state);
+                }
                 break;
             case DISCONNECT:
                 state.set(State.STATE_IDLE);
@@ -538,7 +575,8 @@ public class OutboundMessagingConnection
     }
 
     /**
-     * Handles the result of each message sent.
+     * Handles the result of sending each message. This function will be invoked when all of the bytes of the message have
+     * been TCP ack'ed, not when any application-level response has occurred.
      *
      * // TODO:JEB this will not be invoked on the event loop in the case of large messages (CASSANDRA-13630)
      * Note: this function is expected to be invoked on the netty event loop. Also, do not retain any state from
@@ -548,42 +586,53 @@ public class OutboundMessagingConnection
     {
         completedMessageCount.incrementAndGet();
 
+        if (isClosed())
+            return;
+
         // checking the cause() is an optimized way to tell if the operation was successful (as the cause will be null)
         // Note that ExpiredException is just a marker for timeout-ed message we're dropping, but as we already
         // incremented the dropped message count in MessageOutHandler, we have nothing to do.
         Throwable cause = future.cause();
+        logger.debug("{} JEB::OMC::handleMessageResult state = {}, success = {}, msg = {}", loggingTag(), state, cause == null, message);
         if (cause == null)
         {
             if (!dequeueMessage())
             {
+                logger.debug("{} JEB::OMC::handleMessageResult !dequeueMsg state = {}", loggingTag(), state);
                 state.set(State.STATE_IDLE);
                 // TODO:JEB doc me
-                 if (!backlog.isEmpty() && state.set(State.STATE_IDLE, State.STATE_CONSUME_ENQUEUED))
+                boolean backlogEmpty = backlog.isEmpty();
+                 if (!backlogEmpty && state.set(State.STATE_IDLE, State.STATE_CONSUME_ENQUEUED))
+                 {
+                     logger.debug("{} JEB::OMC::handleMessageResult changes state to ENQUEUED", loggingTag());
                      dequeueMessage();
+                 }
+                 else
+                 {
+                     logger.debug("{} JEB::OMC::handleMessageResult NOP backlogEmpty = {}, state = {}", loggingTag(), backlogEmpty, state);
+                 }
             }
             return;
         }
 
         JVMStabilityInspector.inspectThrowable(cause);
 
-        // TODO::JEB not a fan of this extra flag
-        boolean reconnected = false;
         if (cause instanceof IOException || cause.getCause() instanceof IOException)
         {
-            if (channelWriter.shouldPurgeBacklog())
+            boolean purge = channelWriter.shouldPurgeBacklog();
+            if (purge)
                 purgeBacklog();
 
-            // This writer needs to be closed and we need to trigger a reconnection. We really only want to do that
-            // once for this channel however (and again, no race because we're on the netty event loop).
-            if (!channelWriter.isClosed())
-            {
-                reconnected = true;
-                reconnect();
-                channelWriter.close();
-            }
+            logger.debug("{} JEB::OMC::handleMessageResult IOException, purge = {}, channelWriter.isClosed() = {}, channel closed = {}",
+                         loggingTag(), purge, channelWriter.isClosed(), !channelWriter.channel.isOpen(), cause);
 
-            // maybe reenqueue the victim message
-            if (message != null && message.shouldRetry())
+            ChannelWriter writer = channelWriter;
+            channelWriter = null;
+            state.set(State.STATE_IDLE);
+            writer.close();
+
+            // maybe reenqueue the victim message, unless we're just purging all messages
+            if (!purge && message != null && message.shouldRetry())
                 sendMessage(message.createRetry());
         }
         else if (future.isCancelled())
@@ -597,8 +646,8 @@ public class OutboundMessagingConnection
             logger.error("{} Unexpected error writing", loggingTag(), cause);
         }
 
-        if (!reconnected && !backlog.isEmpty() && state.set(State.STATE_IDLE, State.STATE_CONSUME_ENQUEUED))
-            dequeueMessage();
+        if (!backlog.isEmpty() && state.set(State.STATE_IDLE, State.STATE_CONSUME_ENQUEUED))
+            maybeStartDequeuing();
     }
 
     /**
@@ -642,7 +691,7 @@ public class OutboundMessagingConnection
 
     void purgeBacklog()
     {
-//        logger.debug("{} JEB::OMC::purgeBacklog", loggingTag(), new Exception("JEB dump stack on purge"));
+        logger.debug("{} JEB::OMC::purgeBacklog", loggingTag(), new Exception("JEB dump stack on purge"));
         int droppedCount = backlogSize.getAndSet(0);
         droppedMessageCount.addAndGet(droppedCount);
         backlog.clear();
@@ -657,6 +706,10 @@ public class OutboundMessagingConnection
     {
         if (isClosed())
             return;
+
+        logger.debug("{} JEB::OMC::close softClose = {}", loggingTag(), softClose);
+        if (!softClose)
+            state.close();
 
         cleanupConnectArtifacts(true);
 
@@ -673,9 +726,6 @@ public class OutboundMessagingConnection
                 channelWriter.close();
             }
         }
-
-        if (!softClose)
-            state.close();
     }
 
     @Override
@@ -778,12 +828,12 @@ public class OutboundMessagingConnection
 
     static class State
     {
-        // TODO:JEB document me!!
+        // TODO:ViewFilteringTest document me!!
         static final int STATE_IDLE = 0; // can move to any but RUNNING
-        static final int STATE_CREATING_CONNECTION = 1; // can move to IDLE / CLOSED
-        static final int STATE_CONSUME_ENQUEUED = 3; //can move to IDLE / RUNNING / CLOSED
-        static final int STATE_CONSUME_RUNNING = 4; // can move to IDLE / CLOSED
-        static final int STATE_CLOSED = 5; // final state
+        static final int STATE_CREATING_CONNECTION = 1; // can move to IDLE / CLOSED / ENQUEUED
+        static final int STATE_CONSUME_ENQUEUED = 2; //can move to IDLE / RUNNING / CLOSED
+        static final int STATE_CONSUME_RUNNING = 3; // can move to IDLE / CLOSED
+        static final int STATE_CLOSED = 4; // final state
 
         volatile int state;
         private static final AtomicIntegerFieldUpdater<State> stateUpdater = AtomicIntegerFieldUpdater.newUpdater(State.class, "state");
@@ -823,7 +873,7 @@ public class OutboundMessagingConnection
                 case STATE_CONSUME_RUNNING:
                     return next == STATE_IDLE || next == STATE_CLOSED;
                 case STATE_CREATING_CONNECTION:
-                    return next == STATE_IDLE || next == STATE_CLOSED;
+                    return next != STATE_CONSUME_RUNNING;
                 default:
                     throw new IllegalArgumentException("unknown starting state: " + current);
             }
