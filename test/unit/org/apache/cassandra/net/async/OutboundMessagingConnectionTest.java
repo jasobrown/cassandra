@@ -84,6 +84,7 @@ public class OutboundMessagingConnectionTest
         connectionId = OutboundConnectionIdentifier.small(LOCAL_ADDR, REMOTE_ADDR);
         omc = new OutboundMessagingConnection(connectionId, null, null, new AllowAllInternodeAuthenticator());
         channel = new EmbeddedChannel();
+        channel.attr(OutboundMessagingConnection.PURGE_MESSAGES_CHANNEL_ATTR).set(false);
         OutboundConnectionParams params = OutboundConnectionParams.builder()
                                                                   .protocolVersion(MESSAGING_VERSION)
                                                                   .build();

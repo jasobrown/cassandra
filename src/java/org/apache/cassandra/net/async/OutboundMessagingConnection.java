@@ -35,6 +35,8 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.EventLoop;
+import io.netty.util.Attribute;
+import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
 import org.apache.cassandra.config.Config;
@@ -86,6 +88,12 @@ public class OutboundMessagingConnection
      * Some (artificial) max number of time to attempt to connect at a given time.
      */
     private static final int MAX_RECONNECT_ATTEMPTS = 10;
+
+    /**
+     * A netty channel {@link Attribute} to indicate, when a channel is closed, any backlogged messages should be purged,
+     * as well. See the class-level documentation for more information.
+     */
+    static final AttributeKey<Boolean> PURGE_MESSAGES_CHANNEL_ATTR = AttributeKey.newInstance("purgeMessages");
 
     private final IInternodeAuthenticator authenticator;
 
@@ -236,48 +244,37 @@ public class OutboundMessagingConnection
     //, and d) not closed
     private boolean dequeueMessage()
     {
-//        logger.debug("{} JEB::OMC::dequeueMessage HEAD state = {}, backlog.size() = {}, backlogSize = {}",
-//                     loggingTag(), state, backlog.size(), backlogSize);
+        boolean sentMessage = false;
 
-        boolean messageSent = false;
+        // TODO:JEB docs:
+        // we loop until we know a flush has been scheduled else we'll never get handleMessageResult() invoked
         while (true)
         {
             if (!channelWriter.channel.isWritable())
             {
-                // note: we have to set the state back to IDLE if we did not send a message to channelWriter,
-                // because there's no other component that will do it. handleMessageResult() sets the state correctly
-                // when a message *is* written to the channleWriter
-                // TODO:JEB i might need Nitesh's check here
-//                state.set(State.STATE_IDLE);
-//                return false;
+                if (sentMessage)
+                    channelWriter.channel.flush();
                 break;
             }
 
             QueuedMessage next = backlog.poll();
             if (next == null)
+            {
+                // if we've already dequeued at least one message (on a previous loop iteration), we do not need to
+                // explicitly call flush in this case as the last loop would have seen the backlog size at zero
+                // and would have already called flush.
                 break;
-
-            backlogSize.decrementAndGet();
+            }
 
             if (!next.isTimedOut())
             {
                 logger.debug("{} JEB::OMC::dequeueMessage - sending message {}, backlogSize = {}", loggingTag(), next, backlogSize);
                 channelWriter.write(next).addListener(future -> handleMessageResult(next, future));
-                messageSent = true;
+                sentMessage = true;
 
-
-
-                // TODO:JEB  **IF** the write is executed within this method call, then we can do the flush check here!!!!
-                // without having to pass some fucked up callback into CW
-
-                // assumes "simple CW" for now ... insert a "flush strategy" thingy here
-                if (backlogSize.decrementAndGet() == 0)
-                {
-                    channelWriter.channel.flush();
-                    // TODO:JEB should i break here???? probably don't have to
-                    // ... but gonna just to make my head not hurt wrt nested callback stack
+                int backlogRemaining = backlogSize.decrementAndGet();
+                if (channelWriter.flush(backlogRemaining))
                     break;
-                }
             }
             else
             {
@@ -289,10 +286,13 @@ public class OutboundMessagingConnection
         // because there's no other component that will do it. handleMessageResult() sets the state correctly
         // when a message *is* written to the channleWriter
         // TODO:JEB i might need Nitesh's check here
-        if (!messageSent)
+        // move me to a shared function called from handleMessageResult && maybeStartDequeuing
+        if (!sentMessage)
+        {
             state.set(State.STATE_IDLE);
+        }
 
-        return messageSent;
+        return sentMessage;
     }
 
     /**
@@ -389,7 +389,6 @@ public class OutboundMessagingConnection
                                                                   .tcpNoDelay(tcpNoDelay)
                                                                   .protocolVersion(targetVersion)
                                                                   .eventLoop(eventLoop)
-                                                                  .pendingMessageCountSupplier(backlogSize::get)
                                                                   .build();
 
         return NettyFactory.instance.createOutboundBootstrap(params);
@@ -519,6 +518,7 @@ public class OutboundMessagingConnection
                                  coalescingStrategy != null ? coalescingStrategy : CoalescingStrategies.Strategy.DISABLED);
                 }
                 logger.debug("{} JEB::OMC::finishHandshake SUCCESS state = {}", loggingTag(), state);
+                result.channelWriter.channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).set(false);
                 channelWriter = result.channelWriter;
                 if (state.set(State.STATE_CONSUME_ENQUEUED))
                 {
@@ -619,17 +619,15 @@ public class OutboundMessagingConnection
 
         if (cause instanceof IOException || cause.getCause() instanceof IOException)
         {
-            boolean purge = channelWriter.shouldPurgeBacklog();
+            boolean purge = shouldPurgeBacklog(channelWriter.channel);
             if (purge)
                 purgeBacklog();
 
             logger.debug("{} JEB::OMC::handleMessageResult IOException, purge = {}, channelWriter.isClosed() = {}, channel closed = {}",
                          loggingTag(), purge, channelWriter.isClosed(), !channelWriter.channel.isOpen(), cause);
 
-            ChannelWriter writer = channelWriter;
-            channelWriter = null;
             state.set(State.STATE_IDLE);
-            writer.close();
+            channelWriter.close();
 
             // maybe reenqueue the victim message, unless we're just purging all messages
             if (!purge && message != null && message.shouldRetry())
@@ -648,6 +646,16 @@ public class OutboundMessagingConnection
 
         if (!backlog.isEmpty() && state.set(State.STATE_IDLE, State.STATE_CONSUME_ENQUEUED))
             maybeStartDequeuing();
+    }
+
+
+    boolean shouldPurgeBacklog(Channel channel)
+    {
+        if (!channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).get())
+            return false;
+
+        channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).set(false);
+        return true;
     }
 
     /**

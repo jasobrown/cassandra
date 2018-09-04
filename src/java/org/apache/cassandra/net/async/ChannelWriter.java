@@ -20,8 +20,6 @@ package org.apache.cassandra.net.async;
 
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -40,6 +38,7 @@ import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.ScheduledFuture;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.utils.CoalescingStrategies;
 import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
@@ -131,23 +130,13 @@ import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
 abstract class ChannelWriter
 {
     private static final Logger logger = LoggerFactory.getLogger(ChannelWriter.class);
-    /**
-     * A netty channel {@link Attribute} to indicate, when a channel is closed, any backlogged messages should be purged,
-     * as well. See the class-level documentation for more information.
-     */
-    static final AttributeKey<Boolean> PURGE_MESSAGES_CHANNEL_ATTR = AttributeKey.newInstance("purgeMessages");
 
     protected final Channel channel;
     private volatile boolean closed;
 
-   /** Number of currently pending messages on this channel. */
-    final Supplier<Integer> pendingMessageCountSupplier;
-
-    protected ChannelWriter(Channel channel, Supplier<Integer> pendingMessageCountSupplier)
+    protected ChannelWriter(Channel channel)
     {
         this.channel = channel;
-        this.pendingMessageCountSupplier = pendingMessageCountSupplier;
-        channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).set(false);
     }
 
     /**
@@ -157,8 +146,8 @@ abstract class ChannelWriter
     static ChannelWriter create(Channel channel, OutboundConnectionParams params)
     {
         return params.coalescingStrategy != null
-               ? new CoalescingChannelWriter(channel, params.coalescingStrategy, params.pendingMessageCountSupplier)
-               : new SimpleChannelWriter(channel, params.pendingMessageCountSupplier);
+               ? new CoalescingChannelWriter(channel, params.coalescingStrategy)
+               : new SimpleChannelWriter(channel);
     }
 
     /**
@@ -169,14 +158,7 @@ abstract class ChannelWriter
      */
     abstract ChannelFuture write(QueuedMessage message);
 
-    boolean shouldPurgeBacklog()
-    {
-        if (!channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).get())
-            return false;
-
-        channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).set(false);
-        return true;
-    }
+    abstract boolean flush(int remainingBacklogSize);
 
     void close()
     {
@@ -206,56 +188,32 @@ abstract class ChannelWriter
     }
 
     /**
-     * Invoked after a message has been processed in the pipeline. Should only be used for essential bookkeeping operations.
-     * <p>
-     * Note: this method is invoked on the netty event loop.
-     */
-    abstract void onMessageProcessed(ChannelHandlerContext ctx);
-
-//    /**
-//     * Invoked when pipeline receives a flush request.
-//     * <p>
-//     * Note: this method is invoked on the netty event loop.
-//     */
-//    abstract void onTriggeredFlush(ChannelHandlerContext ctx);
-
-    /**
      * Handles the non-coalescing flush case.
      */
     @VisibleForTesting
     static class SimpleChannelWriter extends ChannelWriter
     {
-        private SimpleChannelWriter(Channel channel, Supplier<Integer> pendingMessageCountSupplier)
+        private SimpleChannelWriter(Channel channel)
         {
-            super(channel, pendingMessageCountSupplier);
+            super(channel);
         }
 
         protected ChannelFuture write(QueuedMessage message)
         {
-            // We don't truly want to flush on every message but we do want to wake-up the netty event loop for the
-            // channel so the message is processed right away, which is why we use writeAndFlush. This won't actually
-            // flush, though, because onTriggeredFlush, which MessageOutHandler delegates to, does nothing. We will
-            // flush after the message is processed though if there is no pending one due to onMessageProcessed.
-            // See the class javadoc for context and much more details.
-
-            // TODO:JEB as we're on the event loop, we don't have to worry about the extra flush call here
             return channel.write(message);
         }
 
-        void onMessageProcessed(ChannelHandlerContext ctx)
+        protected boolean flush(int remainingBacklogSize)
         {
-            int count = pendingMessageCountSupplier.get();
-            logger.debug("{} JEB::CW::simple.onMessageProcessed count = {}", channel.id(), count);
-            if (count == 0)
-                ctx.flush();
-            else
-                logger.debug("JEB::CW::simple.onMessageProcessed - did not flush", new Exception("JEB dump stack"));
-        }
+            if (remainingBacklogSize == 0)
+            {
+                logger.debug("{} JEB::CW::simple::doFLush - sending flush!! {}, backlogSize = {}", channel.id(), remainingBacklogSize);
+                channel.flush();
+                return true;
+            }
 
-//        void onTriggeredFlush(ChannelHandlerContext ctx)
-//        {
-//            // Don't actually flush on "normal" flush calls to the channel.
-//        }
+            return false;
+        }
     }
 
     /**
@@ -269,70 +227,64 @@ abstract class ChannelWriter
         private final CoalescingStrategy strategy;
         private final int minMessagesForCoalesce;
 
-        @VisibleForTesting
-        final AtomicBoolean scheduledFlush = new AtomicBoolean(false);
+        // TODO:JEB doc me
+        private int messagesSinceFlush;
+        private ScheduledFuture<?> scheduledFlush;
 
-        CoalescingChannelWriter(Channel channel, CoalescingStrategy strategy, Supplier<Integer> pendingMessageCountSupplier)
+        CoalescingChannelWriter(Channel channel, CoalescingStrategy strategy)
         {
-            this (channel, strategy, pendingMessageCountSupplier, MIN_MESSAGES_FOR_COALESCE);
+            this (channel, strategy, MIN_MESSAGES_FOR_COALESCE);
         }
 
         @VisibleForTesting
-        CoalescingChannelWriter(Channel channel, CoalescingStrategy strategy, Supplier<Integer> pendingMessageCountSupplier, int minMessagesForCoalesce)
+        CoalescingChannelWriter(Channel channel, CoalescingStrategy strategy, int minMessagesForCoalesce)
         {
-            super(channel, pendingMessageCountSupplier);
+            super(channel);
             this.strategy = strategy;
             this.minMessagesForCoalesce = minMessagesForCoalesce;
         }
 
         protected ChannelFuture write(QueuedMessage message)
         {
-            long pendingCount = pendingMessageCountSupplier.get();
             ChannelFuture future = channel.write(message);
             strategy.newArrival(message);
-
-            // if we lost the race to set the state, simply write to the channel (no flush)
-            if (!scheduledFlush.compareAndSet(false, true))
-                return future;
-
-            long flushDelayNanos;
-            // if we've hit the minimum number of messages for coalescing or we've run out of coalesce time, flush.
-            // note: we check the exact count, instead of greater than or equal to, of message here to prevent a flush task
-            // for each message (if there's messages coming in on multiple threads). There will be, of course, races
-            // with the consumer decrementing the pending counter, but that's still less excessive flushes.
-            if (pendingCount == minMessagesForCoalesce || (flushDelayNanos = strategy.currentCoalescingTimeNanos()) <= 0)
-            {
-                scheduledFlush.set(false);
-                channel.flush();
-            }
-            else
-            {
-                // calling schedule() on the eventLoop will force it to wake up (if not already executing) and schedule the task
-                channel.eventLoop().schedule(() -> {
-                    // NOTE: this executes on the event loop
-                    scheduledFlush.set(false);
-                    // we execute() the flush() as an additional task rather than immediately in-line as there is a
-                    // race condition when this task runs (executing on the event loop) and a thread that writes the channel (top of this method).
-                    // If this task is picked up but before the scheduledFlush falg is flipped, the other thread writes
-                    // and then checks the scheduledFlush (which is still true) and exits.
-                    // This task changes the flag and if it calls flush() in-line, and netty flushs everything immediately (that is, what's been serialized)
-                    // to the transport as we're on the event loop. The other thread's write became a task that executes *after* this task in the netty queue,
-                    // and if there's not a subsequent followup flush scheduled, that write can be orphaned until another write comes in.
-                    channel.eventLoop().execute(channel::flush);
-                }, flushDelayNanos, TimeUnit.NANOSECONDS);
-            }
+            messagesSinceFlush++;
             return future;
         }
 
-        void onMessageProcessed(ChannelHandlerContext ctx)
+        protected boolean flush(int remainingBacklogSize)
         {
-            // nop
+            long flushDelayNanos;
+            // if we've hit the minimum number of messages for coalescing or we've run out of coalesce time, flush.
+            // TODO:JEB compare me with 3.11
+            if (messagesSinceFlush == minMessagesForCoalesce || (flushDelayNanos = strategy.currentCoalescingTimeNanos()) <= 0)
+            {
+                doFlush();
+                return true;
+            }
+            else if (scheduledFlush != null)
+            {
+                scheduledFlush = channel.eventLoop().schedule(this::doFlush, flushDelayNanos, TimeUnit.NANOSECONDS);
+            }
+
+            return false;
         }
 
-        void onTriggeredFlush(ChannelHandlerContext ctx)
+        private void doFlush()
         {
-            // When coalescing, obey the flush calls normally
-            ctx.flush();
+            channel.flush();
+            messagesSinceFlush = 0;
+            scheduledFlush = null;
+        }
+
+        void close()
+        {
+            super.close();
+            if (scheduledFlush != null)
+            {
+                scheduledFlush.cancel(false);
+                scheduledFlush = null;
+            }
         }
     }
 }

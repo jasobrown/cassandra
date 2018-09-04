@@ -49,7 +49,6 @@ public class MessageOutHandlerTest
 {
     private static final int MESSAGING_VERSION = MessagingService.current_version;
 
-    private ChannelWriter channelWriter;
     private EmbeddedChannel channel;
     private MessageOutHandler handler;
     private AtomicInteger pendingMessagesCount;
@@ -74,13 +73,7 @@ public class MessageOutHandlerTest
                                                                                        InetAddressAndPort.getByNameOverrideDefaults("127.0.0.2", 0));
         channel = new EmbeddedChannel();
 
-        OutboundConnectionParams params = OutboundConnectionParams.builder()
-                                                                  .protocolVersion(MESSAGING_VERSION)
-                                                                  .pendingMessageCountSupplier(pendingMessagesCount::get)
-                                                                  .build();
-
-        channelWriter = ChannelWriter.create(channel, params);
-        handler = new MessageOutHandler(connectionId, MESSAGING_VERSION, channelWriter, flushThreshold);
+        handler = new MessageOutHandler(connectionId, MESSAGING_VERSION, flushThreshold);
         channel.pipeline().addLast(handler);
     }
 
@@ -246,6 +239,8 @@ public class MessageOutHandlerTest
         channel.pipeline().addFirst(sender);
 
         MessageOut message = new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE);
+
+        // EmbeddedChnnel.writeOutbound() calls flush() for each message, so prevent that in the handler we add to the pipeline
         channel.writeOutbound(new QueuedMessage(message, 42));
         sender.sendEvent(IdleStateEvent.WRITER_IDLE_STATE_EVENT);
         Assert.assertFalse(channel.isOpen());
@@ -264,6 +259,11 @@ public class MessageOutHandlerTest
         private void sendEvent(Object event)
         {
             ctx.fireUserEventTriggered(event);
+        }
+
+        public void flush(ChannelHandlerContext ctx)
+        {
+            // explicitly catch the flush() to avoid moving the buytes out of the pipeline
         }
     }
 }

@@ -52,10 +52,6 @@ import static org.apache.cassandra.config.Config.PROPERTY_PREFIX;
 /**
  * A Netty {@link ChannelHandler} for serializing outbound messages.
  * <p>
- * On top of transforming a {@link QueuedMessage} into bytes, this handler also feeds back progress to the linked
- * {@link ChannelWriter} so that the latter can take decision on when data should be flushed (with and without coalescing).
- * See the javadoc on {@link ChannelWriter} for more details about the callbacks as well as message timeouts.
- *<p>
  * Note: this class derives from {@link ChannelDuplexHandler} so we can intercept calls to
  * {@link #userEventTriggered(ChannelHandlerContext, Object)}.
  */
@@ -90,20 +86,17 @@ class MessageOutHandler extends ChannelDuplexHandler
      */
     private final int flushSizeThreshold;
 
-    private final ChannelWriter channelWriter;
-
     private String loggingTag;
 
-    MessageOutHandler(OutboundConnectionIdentifier connectionId, int targetMessagingVersion, ChannelWriter channelWriter)
+    MessageOutHandler(OutboundConnectionIdentifier connectionId, int targetMessagingVersion)
     {
-        this (connectionId, targetMessagingVersion, channelWriter, AUTO_FLUSH_THRESHOLD);
+        this (connectionId, targetMessagingVersion, AUTO_FLUSH_THRESHOLD);
     }
 
-    MessageOutHandler(OutboundConnectionIdentifier connectionId, int targetMessagingVersion, ChannelWriter channelWriter, int flushThreshold)
+    MessageOutHandler(OutboundConnectionIdentifier connectionId, int targetMessagingVersion, int flushThreshold)
     {
         this.connectionId = connectionId;
         this.targetMessagingVersion = targetMessagingVersion;
-        this.channelWriter = channelWriter;
         this.flushSizeThreshold = flushThreshold;
     }
 
@@ -168,11 +161,6 @@ class MessageOutHandler extends ChannelDuplexHandler
             exceptionCaught(ctx, e);
             promise.tryFailure(e);
         }
-        finally
-        {
-            // Make sure we signal the outChanel even in case of errors.
-//            channelWriter.onMessageProcessed(ctx);
-        }
     }
 
     /**
@@ -231,12 +219,6 @@ class MessageOutHandler extends ChannelDuplexHandler
                          loggingTag, out.capacity(), out.writerIndex(), msg.message);
     }
 
-//    @Override
-//    public void flush(ChannelHandlerContext ctx)
-//    {
-//        channelWriter.onTriggeredFlush(ctx);
-//    }
-
     /**
      * {@inheritDoc}
      *
@@ -257,7 +239,7 @@ class MessageOutHandler extends ChannelDuplexHandler
             {
                 logger.debug("{} JEB::MOH::userEventTriggered() IDLE STATE, cob.totalPendingWriteBytes() = {}",
                              loggingTag, cob.totalPendingWriteBytes());
-                ctx.channel().attr(ChannelWriter.PURGE_MESSAGES_CHANNEL_ATTR)
+                ctx.channel().attr(OutboundMessagingConnection.PURGE_MESSAGES_CHANNEL_ATTR)
                    .compareAndSet(Boolean.FALSE, Boolean.TRUE);
                 ctx.close();
             }

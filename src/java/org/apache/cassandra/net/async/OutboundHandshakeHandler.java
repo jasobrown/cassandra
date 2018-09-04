@@ -198,7 +198,7 @@ public class OutboundHandshakeHandler extends ByteToMessageDecoder
             pipeline.addLast(NettyFactory.OUTBOUND_COMPRESSOR_HANDLER_NAME, NettyFactory.createLz4Encoder(messagingVersion));
 
         ChannelWriter channelWriter = ChannelWriter.create(channel, params);
-        pipeline.addLast("messageOutHandler", new MessageOutHandler(connectionId, messagingVersion, channelWriter));
+        pipeline.addLast("messageOutHandler", new MessageOutHandler(connectionId, messagingVersion));
         pipeline.remove(this);
         return channelWriter;
     }

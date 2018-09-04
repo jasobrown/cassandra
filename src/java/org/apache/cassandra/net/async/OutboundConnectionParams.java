@@ -18,15 +18,12 @@
 
 package org.apache.cassandra.net.async;
 
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 
 import com.google.common.base.Preconditions;
 
 import io.netty.channel.EventLoop;
 import io.netty.channel.WriteBufferWaterMark;
-import io.netty.util.concurrent.Future;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
 import org.apache.cassandra.net.async.OutboundHandshakeHandler.HandshakeResult;
 import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
@@ -49,7 +46,6 @@ public class OutboundConnectionParams
     final WriteBufferWaterMark waterMark;
     final int protocolVersion;
     final EventLoop eventLoop;
-    final Supplier<Integer> pendingMessageCountSupplier;
 
     private OutboundConnectionParams(OutboundConnectionIdentifier connectionId,
                                      Consumer<HandshakeResult> callback,
@@ -61,8 +57,7 @@ public class OutboundConnectionParams
                                      boolean tcpNoDelay,
                                      WriteBufferWaterMark waterMark,
                                      int protocolVersion,
-                                     EventLoop eventLoop,
-                                     Supplier<Integer> pendingMessageCountSupplier)
+                                     EventLoop eventLoop)
     {
         this.connectionId = connectionId;
         this.callback = callback;
@@ -75,7 +70,6 @@ public class OutboundConnectionParams
         this.waterMark = waterMark;
         this.protocolVersion = protocolVersion;
         this.eventLoop = eventLoop;
-        this.pendingMessageCountSupplier = pendingMessageCountSupplier;
     }
 
     public static Builder builder()
@@ -100,7 +94,6 @@ public class OutboundConnectionParams
         private boolean tcpNoDelay;
         private WriteBufferWaterMark waterMark = WriteBufferWaterMark.DEFAULT;
         private EventLoop eventLoop;
-        private Supplier<Integer> pendingMessageCountSupplier;
         int protocolVersion;
 
         private Builder()
@@ -117,7 +110,6 @@ public class OutboundConnectionParams
             this.sendBufferSize = params.sendBufferSize;
             this.tcpNoDelay = params.tcpNoDelay;
             this.eventLoop = params.eventLoop;
-            this.pendingMessageCountSupplier = params.pendingMessageCountSupplier;
         }
 
         public Builder connectionId(OutboundConnectionIdentifier connectionId)
@@ -186,19 +178,13 @@ public class OutboundConnectionParams
             return this;
         }
 
-        public Builder pendingMessageCountSupplier(Supplier<Integer> pendingMessageCountSupplier)
-        {
-            this.pendingMessageCountSupplier = pendingMessageCountSupplier;
-            return this;
-        }
-
         public OutboundConnectionParams build()
         {
             Preconditions.checkArgument(protocolVersion > 0, "illegal protocol version: " + protocolVersion);
             Preconditions.checkArgument(sendBufferSize > 0 && sendBufferSize < 1 << 20, "illegal send buffer size: " + sendBufferSize);
 
             return new OutboundConnectionParams(connectionId, callback, encryptionOptions, mode, compress, coalescingStrategy, sendBufferSize,
-                                                tcpNoDelay, waterMark, protocolVersion, eventLoop, pendingMessageCountSupplier);
+                                                tcpNoDelay, waterMark, protocolVersion, eventLoop);
         }
     }
 }
