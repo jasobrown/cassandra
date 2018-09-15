@@ -15,7 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.cassandra.streaming.compression;
+package org.apache.cassandra.streaming.compress;
 
 import java.io.*;
 import java.util.*;

@@ -47,6 +47,7 @@ import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.util.DataOutputBufferFixed;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.net.async.ByteBufDataOutputStreamPlus;
@@ -235,7 +236,7 @@ public class NettyStreamingMessageSender implements StreamingMessageSender
     private void sendControlMessage(Channel channel, StreamMessage message, GenericFutureListener listener) throws IOException
     {
         if (logger.isDebugEnabled())
-            logger.debug("{} Sending {}", createLogTag(session, channel), message);
+            logger.debug("{} Sending {} message", createLogTag(session, channel), message);
 
         // we anticipate that the control messages are rather small, so allocating a ByteBuf shouldn't  blow out of memory.
         long messageSize = StreamMessage.serializedSize(message, protocolVersion);
@@ -312,7 +313,7 @@ public class NettyStreamingMessageSender implements StreamingMessageSender
         @Override
         public void run()
         {
-            if (!acquirePermit(SEMAPHORE_UNAVAILABLE_LOG_INTERVAL))
+            if (closed || !acquirePermit(SEMAPHORE_UNAVAILABLE_LOG_INTERVAL))
                 return;
 
             try
@@ -332,9 +333,17 @@ public class NettyStreamingMessageSender implements StreamingMessageSender
                     channel.attr(TRANSFERRING_FILE_ATTR).set(Boolean.FALSE);
                 }
             }
-            catch (Exception e)
+            catch (Throwable e)
             {
-                session.onError(e);
+                // catch Throwable as ChannelProxy (buried deep in OutgoingStreamMessage) may throw an FSReadError.
+                // if the session is already closed, it has already released the reference to the source sstable,
+                // and because we don't have a mechanism to signal the serializer (and it would still be a race anyway),
+                // we get an FSReadError here when trying to read from the ChannelProxy when it's backing file handle is closed.
+                // we already know the stream session is closed, so it's safe to ignore this exception.
+                if (!(closed && e instanceof FSReadError))
+                {
+                    session.onError(e);
+                }
             }
             finally
             {
@@ -501,6 +510,9 @@ public class NettyStreamingMessageSender implements StreamingMessageSender
     @Override
     public void close()
     {
+        if (closed)
+            return;
+
         closed = true;
         if (logger.isDebugEnabled())
             logger.debug("{} Closing stream connection channels on {}", createLogTag(session, null), connectionId);

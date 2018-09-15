@@ -81,6 +81,7 @@ public class CassandraStreamWriter
                                           : null)
         {
             int bufferSize = validator == null ? DEFAULT_CHUNK_SIZE: validator.chunkSize;
+            long fileSize = proxy.size();
 
             // setting up data compression stream
             long progress = 0L;
@@ -103,7 +104,7 @@ public class CassandraStreamWriter
                     while (bytesRead < length)
                     {
                         int toTransfer = (int) Math.min(bufferSize, length - bytesRead);
-                        long lastBytesRead = write(proxy, validator, compressedOutput, start, transferOffset, toTransfer, bufferSize);
+                        long lastBytesRead = write(proxy, validator, compressedOutput, fileSize, start, transferOffset, toTransfer, bufferSize);
                         start += lastBytesRead;
                         bytesRead += lastBytesRead;
                         progress += (lastBytesRead - transferOffset);
@@ -141,10 +142,11 @@ public class CassandraStreamWriter
      *
      * @throws java.io.IOException on any I/O error
      */
-    protected long write(ChannelProxy proxy, ChecksumValidator validator, DataOutputStreamPlus output, long start, int transferOffset, int toTransfer, int bufferSize) throws IOException
+    protected long write(ChannelProxy proxy, ChecksumValidator validator, DataOutputStreamPlus output, long fileSize,
+                         long start, int transferOffset, int toTransfer, int bufferSize) throws IOException
     {
-        // the count of bytes to read off disk
-        int minReadable = (int) Math.min(bufferSize, proxy.size() - start);
+        // the count of bytes to read from the disk
+        int minReadable = (int) Math.min(bufferSize, fileSize - start);
 
         // this buffer will hold the data from disk. as it will be compressed on the fly by
         // ByteBufCompressionDataOutputStreamPlus.write(ByteBuffer), we can release this buffer as soon as we can.

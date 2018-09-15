@@ -410,7 +410,12 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         }
     }
 
-    private synchronized Future closeSession(State finalState)
+    private Future closeSession(State finalState)
+    {
+        return closeSession(finalState, null);
+    }
+
+    private Future closeSession(State finalState, Throwable t)
     {
         Future abortedTasksFuture = null;
         if (isAborted.compareAndSet(false, true))
@@ -420,12 +425,20 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             // ensure aborting the tasks do not happen on the network IO thread (read: netty event loop)
             // as we don't want any blocking disk IO to stop the network thread
             if (finalState == State.FAILED)
+            {
                 abortedTasksFuture = ScheduledExecutors.nonPeriodicTasks.submit(this::abortTasks);
 
-            incomingChannels.values().stream().map(channel -> channel.close());
-            messageSender.close();
+                // send session failure message
+                if (messageSender.connected())
+                    messageSender.sendMessage(new SessionFailedMessage());
+            }
 
+            messageSender.close();
             streamResult.handleSessionComplete(this);
+
+            for (Channel channel : incomingChannels.values())
+                channel.close();
+            incomingChannels.clear();
         }
         return abortedTasksFuture != null ? abortedTasksFuture : Futures.immediateFuture(null);
     }
@@ -434,8 +447,11 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     {
         try
         {
-            receivers.values().forEach(StreamReceiveTask::abort);
-            transfers.values().forEach(StreamTransferTask::abort);
+            for (StreamReceiveTask receiveTask : receivers.values())
+                receiveTask.abort();
+
+            for (StreamTransferTask transferTask : transfers.values())
+                transferTask.abort();
         }
         catch (Exception e)
         {
@@ -534,11 +550,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     public Future onError(Throwable e)
     {
         logError(e);
-        // send session failure message
-        if (messageSender.connected())
-            messageSender.sendMessage(new SessionFailedMessage());
-        // fail session
-        return closeSession(State.FAILED);
+        return closeSession(State.FAILED, e);
     }
 
     private void logError(Throwable e)

@@ -20,6 +20,8 @@ package org.apache.cassandra.streaming.compress;
 
 import java.io.IOException;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.PooledByteBufAllocator;
@@ -45,7 +47,8 @@ public class StreamCompressionInputStream extends RebufferingInputStream impleme
     /**
      * The parent, or owning, buffer of the current buffer being read from ({@link super#buffer}).
      */
-    private ByteBuf currentBuf;
+    @VisibleForTesting
+    ByteBuf currentBuf;
 
     public StreamCompressionInputStream(DataInputPlus dataInputPlus, int protocolVersion)
     {
@@ -66,6 +69,7 @@ public class StreamCompressionInputStream extends RebufferingInputStream impleme
     public void reBuffer() throws IOException
     {
         currentBuf.release();
+        currentBuf = null;
         currentBuf = deserializer.deserialize(decompressor, dataInputPlus, protocolVersion);
         buffer = currentBuf.nioBuffer(0, currentBuf.readableBytes());
     }
@@ -78,6 +82,7 @@ public class StreamCompressionInputStream extends RebufferingInputStream impleme
     @Override
     public void close()
     {
-        currentBuf.release();
+        if (currentBuf != null)
+            currentBuf.release();
     }
 }

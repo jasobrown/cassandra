@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.streaming.async;
 
-import java.io.EOFException;
 import java.io.IOException;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -42,11 +41,11 @@ import org.apache.cassandra.streaming.StreamManager;
 import org.apache.cassandra.streaming.StreamReceiveException;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
-import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.streaming.messages.IncomingStreamMessage;
 import org.apache.cassandra.streaming.messages.KeepAliveMessage;
 import org.apache.cassandra.streaming.messages.StreamInitMessage;
 import org.apache.cassandra.streaming.messages.StreamMessage;
+import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 
 import static org.apache.cassandra.streaming.async.NettyStreamingMessageSender.createLogTag;
@@ -55,6 +54,11 @@ import static org.apache.cassandra.streaming.async.NettyStreamingMessageSender.c
  * Handles the inbound side of streaming messages and stream data. From the incoming data, we derserialize the message
  * including the actual stream data itself. Because the reading and deserialization of streams is a blocking affair,
  * we can't block the netty event loop. Thus we have a background thread perform all the blocking deserialization.
+ *
+ * If the channel is closed by peer (either the peer dies or whatever) {@link #channelInactive(ChannelHandlerContext)}
+ * is called(), which calls close(), which marks the {@link #buffers} as closed. Then, on the {@link StreamDeserializingTask},
+ * while we are blocked for incoming buffers, throws an EOFException, which exits the background task and
+ * closes the stream session.
  */
 public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
 {
@@ -193,10 +197,6 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
                     session.messageReceived(message);
                 }
             }
-            catch (EOFException eof)
-            {
-                // ignore
-            }
             catch (Throwable t)
             {
                 JVMStabilityInspector.inspectThrowable(t);
@@ -210,7 +210,7 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
                 }
                 else
                 {
-                    logger.error("{} stream operation from {} failed", createLogTag(session, channel), remoteAddress, t);
+                    logger.info("{} stream operation from {} failed", createLogTag(session, channel), remoteAddress, t);
                 }
             }
             finally
@@ -223,7 +223,7 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
             }
         }
 
-        StreamSession deriveSession(StreamMessage message) throws IOException
+        StreamSession deriveSession(StreamMessage message)
         {
             StreamSession streamSession = null;
             // StreamInitMessage starts a new channel, and IncomingStreamMessage potentially, as well.
