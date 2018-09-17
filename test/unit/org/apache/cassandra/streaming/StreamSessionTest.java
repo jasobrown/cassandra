@@ -23,13 +23,16 @@ import java.net.UnknownHostException;
 import java.util.Collections;
 import java.util.UUID;
 
+import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessagingServiceTest;
+import org.apache.cassandra.streaming.StreamSession.StreamSessionState;
 
+import static org.apache.cassandra.streaming.StreamSession.StreamSessionState.State;
 import static org.junit.Assert.assertEquals;
 
 public class StreamSessionTest
@@ -63,5 +66,71 @@ public class StreamSessionTest
                           new DefaultConnectionFactory(), 0, UUID.randomUUID(), PreviewKind.ALL, (peer) -> null);
 
         assertEquals(localAddr, streamSession.getMessageSender().getConnectionId().connectionAddress());
+    }
+
+    @Test
+    public void state_INITIALIZED()
+    {
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.INITIALIZED, State.INITIALIZED));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.INITIALIZED, State.PREPARING));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.INITIALIZED, State.STREAMING));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.INITIALIZED, State.WAIT_COMPLETE));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.INITIALIZED, State.COMPLETE));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.INITIALIZED, State.FAILED));
+    }
+
+    @Test
+    public void state_PREPARING()
+    {
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.PREPARING, State.INITIALIZED));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.PREPARING, State.PREPARING));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.PREPARING, State.STREAMING));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.PREPARING, State.WAIT_COMPLETE));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.PREPARING, State.COMPLETE));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.PREPARING, State.FAILED));
+    }
+
+    @Test
+    public void state_STREAMING()
+    {
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.STREAMING, State.INITIALIZED));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.STREAMING, State.PREPARING));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.STREAMING, State.STREAMING));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.STREAMING, State.WAIT_COMPLETE));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.STREAMING, State.COMPLETE));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.STREAMING, State.FAILED));
+    }
+
+    @Test
+    public void state_WAIT_COMPLETE()
+    {
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.WAIT_COMPLETE, State.INITIALIZED));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.WAIT_COMPLETE, State.PREPARING));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.WAIT_COMPLETE, State.STREAMING));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.WAIT_COMPLETE, State.WAIT_COMPLETE));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.WAIT_COMPLETE, State.COMPLETE));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.WAIT_COMPLETE, State.FAILED));
+    }
+
+    @Test
+    public void state_COMPLETE()
+    {
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.COMPLETE, State.INITIALIZED));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.COMPLETE, State.PREPARING));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.COMPLETE, State.STREAMING));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.COMPLETE, State.WAIT_COMPLETE));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.COMPLETE, State.COMPLETE));
+        Assert.assertTrue(StreamSessionState.isValidTransition(State.COMPLETE, State.FAILED));
+    }
+
+    @Test
+    public void state_FAILED()
+    {
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.FAILED, State.INITIALIZED));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.FAILED, State.PREPARING));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.FAILED, State.STREAMING));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.FAILED, State.WAIT_COMPLETE));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.FAILED, State.COMPLETE));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.FAILED, State.FAILED));
     }
 }

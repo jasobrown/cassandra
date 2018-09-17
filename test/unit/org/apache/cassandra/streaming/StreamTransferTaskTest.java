@@ -112,7 +112,7 @@ public class StreamTransferTaskTest
         {
         }
 
-        assertEquals(StreamSession.State.WAIT_COMPLETE, session.state());
+        assertEquals(StreamSession.StreamSessionState.State.WAIT_COMPLETE, session.state());
 
         // when all streaming are done, time out task should not be scheduled.
         assertNull(task.scheduleTimeout(1, 1, TimeUnit.SECONDS));

@@ -25,6 +25,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.streaming.StreamSession.StreamSessionState.State;
 import org.apache.cassandra.utils.FBUtilities;
 
 public class SessionInfoTest
@@ -46,7 +47,7 @@ public class SessionInfoTest
         }
 
         StreamSummary sending = new StreamSummary(tableId, 10, 100);
-        SessionInfo info = new SessionInfo(local, 0, local, summaries, Collections.singleton(sending), StreamSession.State.PREPARING);
+        SessionInfo info = new SessionInfo(local, 0, local, summaries, Collections.singleton(sending), State.PREPARING);
 
         assert info.getTotalFilesToReceive() == 45;
         assert info.getTotalFilesToSend() == 10;

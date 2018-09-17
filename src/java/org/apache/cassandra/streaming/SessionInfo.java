@@ -27,6 +27,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.streaming.StreamSession.StreamSessionState;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
@@ -42,7 +43,7 @@ public final class SessionInfo implements Serializable
     /** Immutable collection of sending summaries*/
     public final Collection<StreamSummary> sendingSummaries;
     /** Current session state */
-    public final StreamSession.State state;
+    public final StreamSessionState.State state;
 
     private final Map<String, ProgressInfo> receivingFiles;
     private final Map<String, ProgressInfo> sendingFiles;
@@ -52,7 +53,7 @@ public final class SessionInfo implements Serializable
                        InetAddressAndPort connecting,
                        Collection<StreamSummary> receivingSummaries,
                        Collection<StreamSummary> sendingSummaries,
-                       StreamSession.State state)
+                       StreamSessionState.State state)
     {
         this.peer = peer;
         this.sessionIndex = sessionIndex;
@@ -66,7 +67,7 @@ public final class SessionInfo implements Serializable
 
     public boolean isFailed()
     {
-        return state == StreamSession.State.FAILED;
+        return state == StreamSessionState.State.FAILED;
     }
 
     /**

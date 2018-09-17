@@ -217,7 +217,7 @@ public class ZeroCopyStreamingBenchmark
             StreamResultFuture future = StreamResultFuture.init(UUID.randomUUID(), StreamOperation.BOOTSTRAP, Collections.<StreamEventHandler>emptyList(), streamCoordinator);
 
             InetAddressAndPort peer = FBUtilities.getBroadcastAddressAndPort();
-            streamCoordinator.addSessionInfo(new SessionInfo(peer, 0, peer, Collections.emptyList(), Collections.emptyList(), StreamSession.State.INITIALIZED));
+            streamCoordinator.addSessionInfo(new SessionInfo(peer, 0, peer, Collections.emptyList(), Collections.emptyList(), StreamSession.StreamSessionState.State.INITIALIZED));
 
             StreamSession session = streamCoordinator.getOrCreateNextSession(peer);
             session.init(future);

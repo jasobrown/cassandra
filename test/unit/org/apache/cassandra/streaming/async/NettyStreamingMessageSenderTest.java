@@ -40,6 +40,7 @@ import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
+import org.apache.cassandra.streaming.StreamSession.StreamSessionState.State;
 import org.apache.cassandra.streaming.messages.CompleteMessage;
 
 public class NettyStreamingMessageSenderTest
@@ -155,7 +156,7 @@ public class NettyStreamingMessageSenderTest
         fileStreamTask = sender.new FileStreamTask(null);
         fileStreamTask.injectChannel(channel);
         fileStreamTask.run();
-        Assert.assertEquals(StreamSession.State.FAILED, session.state());
+        Assert.assertEquals(State.FAILED, session.state());
         Assert.assertTrue(channel.releaseOutbound()); // when the session fails, it will send a SessionFailed msg
         Assert.assertEquals(permits, sender.semaphoreAvailablePermits());
     }
@@ -167,7 +168,7 @@ public class NettyStreamingMessageSenderTest
         fileStreamTask = sender.new FileStreamTask(new CompleteMessage());
         fileStreamTask.injectChannel(channel);
         fileStreamTask.run();
-        Assert.assertNotEquals(StreamSession.State.FAILED, session.state());
+        Assert.assertNotEquals(State.FAILED, session.state());
         Assert.assertTrue(channel.releaseOutbound());
         Assert.assertEquals(permits, sender.semaphoreAvailablePermits());
     }
@@ -182,7 +183,7 @@ public class NettyStreamingMessageSenderTest
         Assert.assertNull(sender.onControlMessageComplete(promise, new CompleteMessage()));
         Assert.assertTrue(channel.isOpen());
         Assert.assertTrue(sender.connected());
-        Assert.assertNotEquals(StreamSession.State.FAILED, session.state());
+        Assert.assertNotEquals(State.FAILED, session.state());
     }
 
     @Test
@@ -198,6 +199,6 @@ public class NettyStreamingMessageSenderTest
 
         Assert.assertFalse(channel.isOpen());
         Assert.assertFalse(sender.connected());
-        Assert.assertEquals(StreamSession.State.FAILED, session.state());
+        Assert.assertEquals(State.FAILED, session.state());
     }
 }

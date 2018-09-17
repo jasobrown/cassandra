@@ -270,8 +270,7 @@ public class StreamCoordinator
         {
             for (StreamSession session : streamSessions.values())
             {
-                StreamSession.State state = session.state();
-                if (state != StreamSession.State.COMPLETE && state != StreamSession.State.FAILED)
+                if (!session.isFinished())
                     return true;
             }
             return false;

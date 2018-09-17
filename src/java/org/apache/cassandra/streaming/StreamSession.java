@@ -20,7 +20,7 @@ package org.apache.cassandra.streaming;
 import java.net.SocketTimeoutException;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -46,6 +46,7 @@ import org.apache.cassandra.metrics.StreamingMetrics;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.async.OutboundConnectionIdentifier;
 import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.streaming.StreamSession.StreamSessionState.State;
 import org.apache.cassandra.streaming.async.NettyStreamingMessageSender;
 import org.apache.cassandra.streaming.messages.*;
 import org.apache.cassandra.utils.FBUtilities;
@@ -103,9 +104,9 @@ import static com.google.common.collect.Iterables.all;
  * 4. Completion phase
  *
  *   (a) When a node enters the completion phase, it sends a {@link CompleteMessage} to the peer, and then enter the
- *       {@link StreamSession.State#WAIT_COMPLETE} state. If it has already received a {@link CompleteMessage}
+ *       {@link State#WAIT_COMPLETE} state. If it has already received a {@link CompleteMessage}
  *       from the peer, session is complete and is then closed ({@link #closeSession(State)}). Otherwise, the node
- *       switch to the {@link StreamSession.State#WAIT_COMPLETE} state and send a {@link CompleteMessage} to the other side.
+ *       switch to the {@link State#WAIT_COMPLETE} state and send a {@link CompleteMessage} to the other side.
  *
  * In brief, the message passing looks like this (I for initiator, F for follwer):
  * (session init)
@@ -161,21 +162,10 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     private final NettyStreamingMessageSender messageSender;
     private final ConcurrentMap<ChannelId, Channel> incomingChannels = new ConcurrentHashMap<>();
 
-    private final AtomicBoolean isAborted = new AtomicBoolean(false);
     private final UUID pendingRepair;
     private final PreviewKind previewKind;
+    private final StreamSessionState state = new StreamSessionState();
 
-    public enum State
-    {
-        INITIALIZED,
-        PREPARING,
-        STREAMING,
-        WAIT_COMPLETE,
-        COMPLETE,
-        FAILED,
-    }
-
-    private volatile State state = State.INITIALIZED;
     private volatile boolean completeSent = false;
 
     /**
@@ -349,8 +339,8 @@ public class StreamSession implements IEndpointStateChangeSubscriber
 
     private void failIfFinished()
     {
-        if (state() == State.COMPLETE || state() == State.FAILED)
-            throw new RuntimeException(String.format("Stream %s is finished with state %s", planId(), state().name()));
+        if (state.isFinished())
+            throw new RuntimeException(String.format("Stream %s is finished with state %s", planId(), state));
     }
 
     private Collection<ColumnFamilyStore> getColumnFamilyStores(String keyspace, Collection<String> columnFamilies)
@@ -410,10 +400,8 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     private synchronized Future closeSession(State finalState)
     {
         Future abortedTasksFuture = null;
-        if (isAborted.compareAndSet(false, true))
+        if (!state.isFinished() && state.set(finalState))
         {
-            state(finalState);
-
             // ensure aborting the tasks do not happen on the network IO thread (read: netty event loop)
             // as we don't want any blocking disk IO to stop the network thread
             if (finalState == State.FAILED)
@@ -445,17 +433,17 @@ public class StreamSession implements IEndpointStateChangeSubscriber
      *
      * @param newState new state to set
      */
-    public void state(State newState)
+    public void unsafeSetState(State newState)
     {
-        state = newState;
+        state.unsafeSet(newState);
     }
 
     /**
      * @return current state
      */
-    public State state()
+    public StreamSessionState.State state()
     {
-        return state;
+        return state.get();
     }
 
     public NettyStreamingMessageSender getMessageSender()
@@ -470,7 +458,12 @@ public class StreamSession implements IEndpointStateChangeSubscriber
      */
     public boolean isSuccess()
     {
-        return state == State.COMPLETE;
+        return state.isSuccess();
+    }
+
+    public boolean isFinished()
+    {
+        return state.isFinished();
     }
 
     public void messageReceived(StreamMessage message)
@@ -517,7 +510,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     public void onInitializationComplete()
     {
         // send prepare message
-        state(State.PREPARING);
+        state.set(State.PREPARING);
         PrepareSynMessage prepare = new PrepareSynMessage();
         prepare.requests.addAll(requests);
         for (StreamTransferTask task : transfers.values())
@@ -564,7 +557,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     public void prepare(Collection<StreamRequest> requests, Collection<StreamSummary> summaries)
     {
         // prepare tasks
-        state(State.PREPARING);
+        state.set(State.PREPARING);
         ScheduledExecutors.nonPeriodicTasks.execute(() -> prepareAsync(requests, summaries));
     }
 
@@ -672,7 +665,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     public synchronized void complete()
     {
         logger.debug("handling Complete message, state = {}, completeSent = {}", state, completeSent);
-        if (state == State.WAIT_COMPLETE)
+        if (state.get() == State.WAIT_COMPLETE)
         {
             if (!completeSent)
             {
@@ -683,7 +676,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         }
         else
         {
-            state(State.WAIT_COMPLETE);
+            state.set(State.WAIT_COMPLETE);
         }
     }
 
@@ -707,7 +700,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         List<StreamSummary> transferSummaries = Lists.newArrayList();
         for (StreamTask transfer : transfers.values())
             transferSummaries.add(transfer.getSummary());
-        return new SessionInfo(peer, index, preferredPeerInetAddressAndPort, receivingSummaries, transferSummaries, state);
+        return new SessionInfo(peer, index, preferredPeerInetAddressAndPort, receivingSummaries, transferSummaries, state.get());
     }
 
     public synchronized void taskCompleted(StreamReceiveTask completedTask)
@@ -744,7 +737,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     {
         try
         {
-            state(State.WAIT_COMPLETE);
+            state.set(State.WAIT_COMPLETE);
             closeSession(State.COMPLETE);
         }
         finally
@@ -761,7 +754,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         boolean completed = receivers.isEmpty() && transfers.isEmpty();
         if (completed)
         {
-            if (state == State.WAIT_COMPLETE)
+            if (state.get() == State.WAIT_COMPLETE)
             {
                 if (!completeSent)
                 {
@@ -775,7 +768,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
                 // notify peer that this session is completed
                 messageSender.sendMessage(new CompleteMessage());
                 completeSent = true;
-                state(State.WAIT_COMPLETE);
+                state.set(State.WAIT_COMPLETE);
             }
         }
         return completed;
@@ -806,7 +799,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         if (notifyPrepared)
             streamResult.handleSessionPrepared(this);
 
-        state(State.STREAMING);
+        state.set(State.STREAMING);
 
         for (StreamTransferTask task : transfers.values())
         {
@@ -838,5 +831,81 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     public int getNumTransfers()
     {
         return transferredRangesPerKeyspace.size();
+    }
+
+    public static class StreamSessionState
+    {
+        public enum State
+        {
+            INITIALIZED,
+            PREPARING,
+            STREAMING,
+            WAIT_COMPLETE,
+            COMPLETE,
+            FAILED
+        }
+
+        private AtomicReference<State> state;
+
+        StreamSessionState()
+        {
+            state = new AtomicReference<>(State.INITIALIZED);
+        }
+
+        public StreamSessionState(String s)
+        {
+            state = new AtomicReference<>(State.valueOf(s));
+        }
+
+        State get()
+        {
+            return state.get();
+        }
+
+        void unsafeSet(State newState)
+        {
+            state.set(newState);
+        }
+
+        boolean set(State nextState)
+        {
+            State currentState = state.get();
+            if (currentState == nextState)
+                return false;
+
+            assert isValidTransition(currentState, nextState);
+            return state.compareAndSet(currentState, nextState);
+        }
+
+        static boolean isValidTransition(State current, State next)
+        {
+            switch (current)
+            {
+                case FAILED:
+                case COMPLETE:
+                    return false;
+                case INITIALIZED:
+                    return next == State.PREPARING || next == State.FAILED;
+                case PREPARING:
+                    return next == State.STREAMING || next == State.FAILED;
+                case STREAMING:
+                    return next == State.WAIT_COMPLETE || next == State.COMPLETE || next == State.FAILED;
+                case WAIT_COMPLETE:
+                    return next == State.COMPLETE || next == State.FAILED;
+                default:
+                    throw new IllegalArgumentException("unknown state: " + next);
+            }
+        }
+
+        boolean isFinished()
+        {
+            State current = state.get();
+            return current == State.FAILED || current == State.COMPLETE;
+        }
+
+        boolean isSuccess()
+        {
+            return state.get() == State.COMPLETE;
+        }
     }
 }

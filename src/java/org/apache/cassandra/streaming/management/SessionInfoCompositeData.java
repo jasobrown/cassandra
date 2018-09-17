@@ -103,7 +103,7 @@ public class SessionInfoCompositeData
         };
         valueMap.put(ITEM_NAMES[5], toArrayOfCompositeData(sessionInfo.receivingSummaries, fromStreamSummary));
         valueMap.put(ITEM_NAMES[6], toArrayOfCompositeData(sessionInfo.sendingSummaries, fromStreamSummary));
-        valueMap.put(ITEM_NAMES[7], sessionInfo.state.name());
+        valueMap.put(ITEM_NAMES[7], sessionInfo.state);
         Function<ProgressInfo, CompositeData> fromProgressInfo = new Function<ProgressInfo, CompositeData>()
         {
             public CompositeData apply(ProgressInfo input)
@@ -151,7 +151,7 @@ public class SessionInfoCompositeData
                                            connecting,
                                            fromArrayOfCompositeData((CompositeData[]) values[5], toStreamSummary),
                                            fromArrayOfCompositeData((CompositeData[]) values[6], toStreamSummary),
-                                           StreamSession.State.valueOf((String) values[7]));
+                                           StreamSession.StreamSessionState.State.valueOf((String) values[7]));
         Function<CompositeData, ProgressInfo> toProgressInfo = new Function<CompositeData, ProgressInfo>()
         {
             public ProgressInfo apply(CompositeData input)
