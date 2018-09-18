@@ -421,7 +421,7 @@ public class OutboundMessagingConnection
         final long timestampNanos = System.nanoTime();
         long currentTime = timestampNanos;
         boolean flushed = false;
-        boolean sentMessages = false;
+        ChannelFuture future = null;
 
         // we loop until we know a flush has been scheduled else we'll never get handleMessageResult() invoked
         for (int i = 0; i < MAX_DEQUEUE_COUNT && currentTime - timestampNanos < MAX_TIME_DEQUEUING_NANOS; i++)
@@ -442,8 +442,8 @@ public class OutboundMessagingConnection
 
             if (!next.isTimedOut(timestampNanos))
             {
-                channelWriter.write(next).addListener(future -> handleMessageResult(next, future));
-                sentMessages = true;
+                future = channelWriter.write(next);
+                future.addListener(f -> completedMessageCount.incrementAndGet());
 
                 flushed = channelWriter.flush(!backlog.isEmpty());
                 if (flushed)
@@ -457,16 +457,22 @@ public class OutboundMessagingConnection
             currentTime = System.nanoTime();
         }
 
-        // note: we have to set the state back to IDLE if we did not send a message to channelWriter,
+
+        // TODO:JEB fix this comment -- note: we have to set the state back to IDLE if we did not send a message to channelWriter,
         // because there's no other component that will do it. handleMessageResult() sets the state correctly
         // when a message *is* written to the channleWriter
-        if (!sentMessages)
-            state.set(State.STATE_IDLE);
-        else if (!flushed)
-            channelWriter.channel.flush();
-
+        state.set(State.STATE_IDLE);
         maybeEnqueueConsumerTask();
-        return sentMessages;
+
+        if (future != null)
+        {
+            if (!flushed)
+                channelWriter.channel.flush();
+
+            future.addListener(this::handleMessageResult);
+        }
+
+        return future != null;
     }
 
     /**
@@ -749,10 +755,8 @@ public class OutboundMessagingConnection
      *
      * Note: this function is expected to be invoked on the netty event loop.
      */
-    void handleMessageResult(QueuedMessage message, Future<? super Void> future)
+    void handleMessageResult(Future<? super Void> future)
     {
-        completedMessageCount.incrementAndGet();
-
         if (isClosed())
             return;
 
@@ -760,8 +764,7 @@ public class OutboundMessagingConnection
         Throwable cause = future.cause();
         if (cause == null)
         {
-            if (!dequeueMessages())
-                maybeEnqueueConsumerTask();
+            maybeEnqueueConsumerTask();
             return;
         }
 
@@ -769,16 +772,11 @@ public class OutboundMessagingConnection
 
         if (cause instanceof IOException || cause.getCause() instanceof IOException)
         {
-            boolean purge = shouldPurgeBacklog(channelWriter.channel);
-            if (purge)
+            if (shouldPurgeBacklog(channelWriter.channel))
                 purgeBacklog();
 
-            state.set(State.STATE_IDLE);
+            // TODO:JEB might need to set the state to IDLE
             channelWriter.close();
-
-            // maybe reenqueue the victim message, unless we're just purging all messages
-            if (!purge && message != null && message.shouldRetry())
-                sendMessage(message.createRetry());
         }
         else if (future.isCancelled())
         {

@@ -573,9 +573,8 @@ public class OutboundMessagingConnectionTest
     {
         ChannelPromise promise = channel.newPromise();
         promise.cancel(false);
-        omc.handleMessageResult(new QueuedMessage(new MessageOut<>(ECHO), 1), promise);
+        omc.handleMessageResult(promise);
         Assert.assertTrue(channel.isActive());
-        Assert.assertEquals(1, omc.getCompletedMessages().longValue());
         Assert.assertEquals(0, omc.getDroppedMessages().longValue());
     }
 
@@ -584,9 +583,8 @@ public class OutboundMessagingConnectionTest
     {
         ChannelPromise promise = channel.newPromise();
         promise.setFailure(new NullPointerException("this is a test"));
-        omc.handleMessageResult(new QueuedMessage(new MessageOut<>(ECHO), 1), promise);
+        omc.handleMessageResult(promise);
         Assert.assertTrue(channel.isActive());
-        Assert.assertEquals(1, omc.getCompletedMessages().longValue());
         Assert.assertEquals(0, omc.getDroppedMessages().longValue());
         assertBacklogSizes(0);
     }
@@ -597,11 +595,10 @@ public class OutboundMessagingConnectionTest
         ChannelPromise promise = channel.newPromise();
         promise.setFailure(new IOException("this is a test"));
         Assert.assertTrue(channel.isActive());
-        omc.handleMessageResult(new QueuedMessage(new MessageOut<>(ECHO), 1, 0, true, true), promise);
+        omc.handleMessageResult(promise);
         Assert.assertFalse(channel.isActive());
-        Assert.assertEquals(1, omc.getCompletedMessages().longValue());
         Assert.assertEquals(0, omc.getDroppedMessages().longValue());
-        assertBacklogSizes(1);
+        assertBacklogSizes(0);
     }
 
     @Test
@@ -610,9 +607,8 @@ public class OutboundMessagingConnectionTest
         ChannelPromise promise = channel.newPromise();
         promise.cancel(false);
         Assert.assertTrue(channel.isActive());
-        omc.handleMessageResult(new QueuedMessage(new MessageOut<>(ECHO), 1, 0, true, true), promise);
+        omc.handleMessageResult(promise);
         Assert.assertTrue(channel.isActive());
-        Assert.assertEquals(1, omc.getCompletedMessages().longValue());
         Assert.assertEquals(0, omc.getDroppedMessages().longValue());
         assertBacklogSizes(0);
     }
