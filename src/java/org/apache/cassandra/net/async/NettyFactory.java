@@ -42,6 +42,7 @@ import io.netty.util.internal.logging.Slf4JLoggerFactory;
 import net.jpountz.lz4.LZ4Factory;
 import net.jpountz.xxhash.XXHashFactory;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -60,6 +61,9 @@ import org.apache.cassandra.utils.FBUtilities;
 public final class NettyFactory
 {
     private static final Logger logger = LoggerFactory.getLogger(NettyFactory.class);
+
+    private static final int INBOUND_THREADS = Integer.getInteger(Config.PROPERTY_PREFIX + "internode-inbound-threads", FBUtilities.getAvailableProcessors());
+    private static final int OUTBOUND_THREADS = Integer.getInteger(Config.PROPERTY_PREFIX + "internode-outbound-threads", FBUtilities.getAvailableProcessors());
 
     /**
      * The block size for use with netty's lz4 code.
@@ -121,8 +125,8 @@ public final class NettyFactory
         this.useEpoll = useEpoll;
         acceptGroup = getEventLoopGroup(useEpoll, determineAcceptGroupSize(DatabaseDescriptor.getInternodeMessagingEncyptionOptions()),
                                         "MessagingService-NettyAcceptor-Thread", false);
-        inboundGroup = getEventLoopGroup(useEpoll, FBUtilities.getAvailableProcessors(), "MessagingService-NettyInbound-Thread", false);
-        outboundGroup = getEventLoopGroup(useEpoll, FBUtilities.getAvailableProcessors(), "MessagingService-NettyOutbound-Thread", true);
+        inboundGroup = getEventLoopGroup(useEpoll, INBOUND_THREADS, "MessagingService-NettyInbound-Thread", false);
+        outboundGroup = getEventLoopGroup(useEpoll, OUTBOUND_THREADS, "MessagingService-NettyOutbound-Thread", true);
         streamingGroup = getEventLoopGroup(useEpoll, FBUtilities.getAvailableProcessors(), "Streaming-Netty-Thread", false);
     }
 
