@@ -128,6 +128,8 @@ public class OutboundMessagingConnection
      */
     private static final int MAX_DEQUEUE_COUNT = 32;
 
+    private static final long MAX_TIME_DEQUEUING_NANOS = TimeUnit.MICROSECONDS.toNanos(500);
+
     /**
      * A netty channel {@link Attribute} to indicate, when a channel is closed, any backlogged messages should be purged,
      * as well. See the class-level documentation for more information.
@@ -416,18 +418,16 @@ public class OutboundMessagingConnection
      */
     private boolean dequeueMessages()
     {
-        int sentMessages = 0;
-        long timestampNanos = System.nanoTime();
+        final long timestampNanos = System.nanoTime();
+        long currentTime = timestampNanos;
+        boolean flushed = false;
+        boolean sentMessages = false;
 
         // we loop until we know a flush has been scheduled else we'll never get handleMessageResult() invoked
-        while (true)
+        for (int i = 0; i < MAX_DEQUEUE_COUNT && currentTime - timestampNanos < MAX_TIME_DEQUEUING_NANOS; i++)
         {
             if (!channelWriter.channel.isWritable())
-            {
-                if (sentMessages > 0)
-                    channelWriter.channel.flush();
                 break;
-            }
 
             QueuedMessage next = backlog.poll();
             if (next == null)
@@ -443,32 +443,30 @@ public class OutboundMessagingConnection
             if (!next.isTimedOut(timestampNanos))
             {
                 channelWriter.write(next).addListener(future -> handleMessageResult(next, future));
-                sentMessages++;
+                sentMessages = true;
 
-                boolean flushed = channelWriter.flush(!backlog.isEmpty());
-
+                flushed = channelWriter.flush(!backlog.isEmpty());
                 if (flushed)
                     break;
-                else if (sentMessages == MAX_DEQUEUE_COUNT)
-                {
-                    channelWriter.channel.flush();
-                    break;
-                }
             }
             else
             {
                 droppedMessageCount.incrementAndGet();
             }
+
+            currentTime = System.nanoTime();
         }
 
         // note: we have to set the state back to IDLE if we did not send a message to channelWriter,
         // because there's no other component that will do it. handleMessageResult() sets the state correctly
         // when a message *is* written to the channleWriter
-        if (sentMessages == 0)
+        if (!sentMessages)
             state.set(State.STATE_IDLE);
+        else if (!flushed)
+            channelWriter.channel.flush();
 
         maybeEnqueueConsumerTask();
-        return sentMessages > 0;
+        return sentMessages;
     }
 
     /**

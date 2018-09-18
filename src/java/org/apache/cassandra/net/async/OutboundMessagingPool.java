@@ -61,7 +61,7 @@ public class OutboundMessagingPool
     {
         preferredRemoteAddr = remoteAddr;
         this.backPressureState = backPressureState;
-        metrics = new ConnectionMetrics(localAddr, this);
+        metrics = new ConnectionMetrics(remoteAddr, this);
 
 
         smallMessageChannel = new OutboundMessagingConnection(OutboundConnectionIdentifier.small(localAddr, preferredRemoteAddr),
