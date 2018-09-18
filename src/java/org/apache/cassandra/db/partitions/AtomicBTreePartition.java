@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
@@ -47,7 +48,7 @@ import org.apache.cassandra.utils.memory.MemtableAllocator;
  * other thread can see the state where only parts but not all rows have
  * been added.
  */
-public final class AtomicBTreePartition extends AtomicBTreePartitionBase
+public final class AtomicBTreePartition extends AbstractBTreePartition
 {
     public static final long EMPTY_SIZE = ObjectSizes.measure(new AtomicBTreePartition(null,
                                                                                        DatabaseDescriptor.getPartitioner().decorateKey(ByteBuffer.allocate(1)),
@@ -83,6 +84,9 @@ public final class AtomicBTreePartition extends AtomicBTreePartitionBase
     private volatile Holder ref;
 
     private final TableMetadataRef metadata;
+
+    private volatile ReentrantLock lock;
+    private static final AtomicReferenceFieldUpdater<AtomicBTreePartition, ReentrantLock> lockUpdater = AtomicReferenceFieldUpdater.newUpdater(AtomicBTreePartition.class, ReentrantLock.class, "lock");
 
     public AtomicBTreePartition(TableMetadataRef metadata, DecoratedKey partitionKey, MemtableAllocator allocator)
     {
@@ -189,6 +193,19 @@ public final class AtomicBTreePartition extends AtomicBTreePartitionBase
             if (monitorOwned)
                 releaseLock();
         }
+    }
+
+    protected final void acquireLock()
+    {
+     	if (lock == null)
+            lockUpdater.compareAndSet(this, null, new ReentrantLock());
+
+        lock.lock();
+    }
+
+    protected final void releaseLock()
+    {
+     	lock.unlock();
     }
 
     @Override
