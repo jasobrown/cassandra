@@ -669,24 +669,22 @@ public class OutboundMessagingConnectionTest
         long currentTime = System.nanoTime();
         for (int i = 0; i < droppableCount; i++)
         {
-            // add a non-expired, droppable message
-            omc.addToBacklog(new QueuedMessage(new MessageOut<>(ECHO), i, currentTime, true, true));
-
             // add an expired message
             omc.addToBacklog(new QueuedMessage(new MessageOut<>(ECHO), i, 0, true, true));
-
-            // add a non-droppable message
-            omc.addToBacklog(new QueuedMessage(new MessageOut<>(ECHO), i, currentTime, false, true));
-
-            // add an expired, non-droppable message
-            omc.addToBacklog(new QueuedMessage(new MessageOut<>(ECHO), i, 0, false, true));
         }
 
+
+        // add a non-droppable message
+        omc.addToBacklog(new QueuedMessage(new MessageOut<>(ECHO), droppableCount + 1, currentTime, false, true));
+
+        // add an expired message - but won't be removed
+        omc.addToBacklog(new QueuedMessage(new MessageOut<>(ECHO), droppableCount + 2, 0, true, true));
+
         omc.backlogNextExpirationTime = currentTime;
-        Assert.assertEquals(droppableCount * 4, omc.backlogSize.get());
+        Assert.assertEquals(droppableCount + 2, omc.backlogSize.get());
         Assert.assertEquals(droppableCount, omc.expireMessages());
         Assert.assertEquals(droppableCount, omc.getDroppedMessages().longValue());
-        Assert.assertEquals(droppableCount * 3, omc.backlogSize.get());
+        Assert.assertEquals(2, omc.backlogSize.get());
         Assert.assertFalse(omc.backlogExpirationActive.get());
         Assert.assertTrue(currentTime < omc.backlogNextExpirationTime);
     }

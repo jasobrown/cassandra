@@ -19,9 +19,7 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
-import java.util.Iterator;
 import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -53,6 +51,7 @@ import org.apache.cassandra.utils.CoalescingStrategies;
 import org.apache.cassandra.utils.CoalescingStrategies.CoalescingStrategy;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.NoSpamLogger;
+import org.jctools.queues.MpscLinkedQueue;
 
 /**
  * Represents a connection type to a peer, and handles the state transistions on the connection and the netty {@link Channel}.
@@ -244,7 +243,7 @@ public class OutboundMessagingConnection
         this.coalescingStrategy = coalescingStrategy;
         this.maxQueueDepth = maxQueueDepth;
 
-        backlog = new ConcurrentLinkedQueue<>();
+        backlog = MpscLinkedQueue.newMpscLinkedQueue();
         backlogSize = new AtomicInteger(0);
 
         backlogExpirationActive = new AtomicBoolean(false);
@@ -340,16 +339,15 @@ public class OutboundMessagingConnection
         long timestampNanos = System.nanoTime();
         try
         {
-
-            Iterator<QueuedMessage> iter = backlog.iterator();
-            while (iter.hasNext())
+            // jctools queues do not support iterators, so iterate until we can't remove a message :(
+            // for reference as to why jctools has no iterator support, https://github.com/JCTools/JCTools/issues/124
+            QueuedMessage qm;
+            while ((qm = backlog.peek()) != null)
             {
-                QueuedMessage qm = iter.next();
-                if (!qm.droppable)
-                    continue;
-                if (!qm.isTimedOut(timestampNanos))
-                    continue;
-                iter.remove();
+                if (!qm.droppable || !qm.isTimedOut(timestampNanos))
+                    break;
+
+                backlog.remove();
                 expiredMessageCount++;
             }
 

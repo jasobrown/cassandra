@@ -180,19 +180,12 @@ public class NettyFactoryTest
         }
     }
 
-    @Test
-    public void getEventLoopGroup_EpollWithIoRatioBoost()
-    {
-        Assume.assumeTrue(EPOLL_AVAILABLE);
-        getEventLoopGroup_Epoll(true);
-    }
-
-    private EpollEventLoopGroup getEventLoopGroup_Epoll(boolean ioBoost)
+    private EpollEventLoopGroup getEventLoopGroup_Epoll()
     {
         EventLoopGroup eventLoopGroup;
         try
         {
-            eventLoopGroup = NettyFactory.getEventLoopGroup(true, 1, "testEventLoopGroup", ioBoost);
+            eventLoopGroup = NettyFactory.getEventLoopGroup(true, 1, "testEventLoopGroup");
         }
         catch (Exception e)
         {
@@ -208,13 +201,6 @@ public class NettyFactoryTest
     }
 
     @Test
-    public void getEventLoopGroup_EpollWithoutIoRatioBoost()
-    {
-        Assume.assumeTrue(EPOLL_AVAILABLE);
-        getEventLoopGroup_Epoll(false);
-    }
-
-    @Test
     public void getEventLoopGroup_NioWithoutIoRatioBoost()
     {
         getEventLoopGroup_Nio(true);
@@ -222,7 +208,7 @@ public class NettyFactoryTest
 
     private NioEventLoopGroup getEventLoopGroup_Nio(boolean ioBoost)
     {
-        EventLoopGroup eventLoopGroup = NettyFactory.getEventLoopGroup(false, 1, "testEventLoopGroup", ioBoost);
+        EventLoopGroup eventLoopGroup = NettyFactory.getEventLoopGroup(false, 1, "testEventLoopGroup");
         Assert.assertTrue(eventLoopGroup instanceof NioEventLoopGroup);
         return (NioEventLoopGroup) eventLoopGroup;
     }
