@@ -297,7 +297,7 @@ public class OutboundMessagingConnection
             return false;
         }
 
-        backlog.add(queuedMessage);
+        backlog.offer(queuedMessage);
         backlogSize.incrementAndGet();
 
         if (state.set(State.STATE_IDLE, State.STATE_CONSUME_ENQUEUED))
@@ -414,65 +414,85 @@ public class OutboundMessagingConnection
      * Pull messages off the {@link #backlog} and write them to the netty channel until we can flush (or hit an upper bound).
      * Assumes the {@link #channelWriter} and channel are properly established, and that we are in the RUNNING state.
      *
+     * This method must always call flush after the last message has been written to the queue,
+     * else the callbacks (listeners on the {@link ChannelFuture}) will never be invoked.
+     *
      * Note: executes on the netty event loop.
      */
     private boolean dequeueMessages()
     {
         final long timestampNanos = System.nanoTime();
-        long currentTime = timestampNanos;
+        long deadLineNanos = timestampNanos + MAX_TIME_DEQUEUING_NANOS;
         boolean flushed = false;
         ChannelFuture future = null;
 
-        // we loop until we know a flush has been scheduled else we'll never get handleMessageResult() invoked
-        for (int i = 0; i < MAX_DEQUEUE_COUNT && currentTime - timestampNanos < MAX_TIME_DEQUEUING_NANOS; i++)
+        try
         {
+            // check this once, outside of the for loop, as adding excess data is not a huge problem,
+            // especially in the common case of small messages (where 'less' is less than 1k).
             if (!channelWriter.channel.isWritable())
-                break;
+                return false;
 
-            QueuedMessage next = backlog.poll();
-            if (next == null)
+            // we loop until we know a flush has been scheduled else we'll never get handleMessageResult() invoked
+            for (int i = 0; i < MAX_DEQUEUE_COUNT; i++)
             {
-                // if we've already dequeued at least one message (on a previous loop iteration), we do not need to
-                // explicitly call flush in this case as the last loop would have seen the backlog size at zero
-                // and would have already called flush.
-                break;
-            }
+                QueuedMessage next = backlog.poll();
+                if (next == null)
+                {
+                    // if we've already dequeued at least one message (on a previous loop iteration), we do not need to
+                    // explicitly call flush in this case as the last loop would have seen the backlog size at zero
+                    // and would have already called flush.
+                    break;
+                }
 
-            backlogSize.decrementAndGet();
+                backlogSize.decrementAndGet();
 
-            if (!next.isTimedOut(timestampNanos))
-            {
-                future = channelWriter.write(next);
-                future.addListener(f -> completedMessageCount.incrementAndGet());
+                if (!next.isTimedOut(timestampNanos))
+                {
+                    future = channelWriter.write(next);
+                    future.addListener(f -> completedMessageCount.incrementAndGet());
 
-                flushed = channelWriter.flush(!backlog.isEmpty());
-                if (flushed)
+                    flushed = channelWriter.flush(!backlog.isEmpty());
+                    if (flushed)
+                        break;
+                }
+                else
+                {
+                    droppedMessageCount.incrementAndGet();
+                }
+
+                // Check timeout every 8 tasks because nanoTime() is relatively expensive.
+                if ((i & 0x7) == 0 && deadLineNanos <= System.nanoTime())
                     break;
             }
-            else
-            {
-                droppedMessageCount.incrementAndGet();
-            }
-
-            currentTime = System.nanoTime();
         }
-
-
-        // TODO:JEB fix this comment -- note: we have to set the state back to IDLE if we did not send a message to channelWriter,
-        // because there's no other component that will do it. handleMessageResult() sets the state correctly
-        // when a message *is* written to the channleWriter
-        state.set(State.STATE_IDLE);
-        maybeEnqueueConsumerTask();
+        catch (Exception e)
+        {
+            // TODO:JEB do something here
+        }
+        finally
+        {
+            // TODO:JEB fix this comment -- note: we have to set the state back to IDLE if we did not send a message to channelWriter,
+            // because there's no other component that will do it. handleMessageResult() sets the state correctly
+            // when a message *is* written to the channleWriter
+            state.set(State.STATE_IDLE);
+            maybeEnqueueConsumerTask();
+        }
 
         if (future != null)
         {
             if (!flushed)
+                // TODO:JEB rethink this. I can choose to reschedule the consumer task, and once it drains the queue it can flush,
+                // but the multuplexing of channels might get in the way (and delay the flush).
+                // otherwise, I am bounding the max number of messages before a flush to MAX_DEQUEUE_COUNT
                 channelWriter.channel.flush();
 
+            // only add the result listener to the last message written to the pipeline as we don't need to try to
+            // enqueue the consumer task yet even more times.
             future.addListener(this::handleMessageResult);
+            return true;
         }
-
-        return future != null;
+        return false;
     }
 
     /**
@@ -775,7 +795,6 @@ public class OutboundMessagingConnection
             if (shouldPurgeBacklog(channelWriter.channel))
                 purgeBacklog();
 
-            // TODO:JEB might need to set the state to IDLE
             channelWriter.close();
         }
         else if (future.isCancelled())
