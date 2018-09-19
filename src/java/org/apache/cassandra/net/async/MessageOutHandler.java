@@ -115,34 +115,52 @@ class MessageOutHandler extends ChannelDuplexHandler
         if (!ctx.channel().isOpen())
         {
             logger.debug("{} attempting to process a message in the pipeline, but channel is closed", loggingTag);
+            ReferenceCountUtil.release(o);
             promise.tryFailure(new ClosedChannelException());
+            return;
+        }
+
+        try
+        {
+            if (o instanceof ByteBuf)
+            {
+                ctx.write(o, promise);
+            }
+            else if (o instanceof QueuedMessage)
+            {
+                write(ctx, (QueuedMessage)o, promise);
+            }
+            else
+            {
+                ReferenceCountUtil.release(o);
+                promise.tryFailure(new UnsupportedMessageTypeException(connectionId + " msg must be an instance of " +
+                                                                       QueuedMessage.class.getSimpleName()));
+            }
+        }
+        catch(Exception e)
+        {
+            exceptionCaught(ctx, e);
+            promise.tryFailure(e);
+        }
+    }
+
+
+    private void write(ChannelHandlerContext ctx, QueuedMessage msg, ChannelPromise promise) throws IOException
+    {
+        // frame size includes the magic and and other values *before* the actual serialized message.
+        // note: don't even bother to check the compressed size (if compression is enabled for the channel),
+        // cuz if it's this large already, we're probably screwed anyway
+        long currentFrameSize = MESSAGE_PREFIX_SIZE + msg.message.serializedSize(targetMessagingVersion);
+        if (currentFrameSize > Integer.MAX_VALUE || currentFrameSize < 0)
+        {
+            promise.tryFailure(new IllegalStateException(String.format("%s illegal frame size: %d, ignoring message", loggingTag, currentFrameSize)));
             return;
         }
 
         ByteBuf out = null;
         try
         {
-            if (!(o instanceof QueuedMessage))
-            {
-                ReferenceCountUtil.release(o);
-                promise.tryFailure(new UnsupportedMessageTypeException(connectionId + " msg must be an instance of " +
-                                                                       QueuedMessage.class.getSimpleName()));
-                return;
-            }
-
-            QueuedMessage msg = (QueuedMessage) o;
-
-            // frame size includes the magic and and other values *before* the actual serialized message.
-            // note: don't even bother to check the compressed size (if compression is enabled for the channel),
-            // cuz if it's this large already, we're probably screwed anyway
-            long currentFrameSize = MESSAGE_PREFIX_SIZE + msg.message.serializedSize(targetMessagingVersion);
-            if (currentFrameSize > Integer.MAX_VALUE || currentFrameSize < 0)
-            {
-                promise.tryFailure(new IllegalStateException(String.format("%s illegal frame size: %d, ignoring message", loggingTag, currentFrameSize)));
-                return;
-            }
-
-            out = ctx.alloc().ioBuffer((int)currentFrameSize);
+            out = ctx.alloc().ioBuffer((int) currentFrameSize);
 
             captureTracingInfo(msg);
             serializeMessage(msg, out);
@@ -153,12 +171,11 @@ class MessageOutHandler extends ChannelDuplexHandler
             if (outboundBuffer != null && outboundBuffer.totalPendingWriteBytes() >= flushSizeThreshold)
                 ctx.flush();
         }
-        catch(Exception e)
+        catch (Exception e)
         {
             if (out != null && out.refCnt() > 0)
                 out.release(out.refCnt());
-            exceptionCaught(ctx, e);
-            promise.tryFailure(e);
+            throw e;
         }
     }
 

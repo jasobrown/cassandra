@@ -112,7 +112,7 @@ public final class NettyFactory
     private final EventLoopGroup acceptGroup;
 
     private final EventLoopGroup inboundGroup;
-    public final EventLoopGroup outboundGroup;
+    final EventLoopGroup outboundGroup;
     public final EventLoopGroup streamingGroup;
 
     /**
@@ -123,11 +123,10 @@ public final class NettyFactory
     NettyFactory(boolean useEpoll)
     {
         this.useEpoll = useEpoll;
-        acceptGroup = getEventLoopGroup(useEpoll, determineAcceptGroupSize(DatabaseDescriptor.getInternodeMessagingEncyptionOptions()),
-                                        "MessagingService-NettyAcceptor-Thread", false);
-        inboundGroup = getEventLoopGroup(useEpoll, INBOUND_THREADS, "MessagingService-NettyInbound-Thread", false);
-        outboundGroup = getEventLoopGroup(useEpoll, OUTBOUND_THREADS, "MessagingService-NettyOutbound-Thread", true);
-        streamingGroup = getEventLoopGroup(useEpoll, FBUtilities.getAvailableProcessors(), "Streaming-Netty-Thread", false);
+        acceptGroup = getEventLoopGroup(useEpoll, determineAcceptGroupSize(DatabaseDescriptor.getInternodeMessagingEncyptionOptions()), "MessagingService-NettyAcceptor-Thread");
+        inboundGroup = getEventLoopGroup(useEpoll, INBOUND_THREADS, "MessagingService-NettyInbound-Thread");
+        outboundGroup = getEventLoopGroup(useEpoll, OUTBOUND_THREADS, "MessagingService-NettyOutbound-Thread");
+        streamingGroup = getEventLoopGroup(useEpoll, FBUtilities.getAvailableProcessors(), "Streaming-Netty-Thread");
     }
 
     /**
@@ -153,33 +152,16 @@ public final class NettyFactory
         return listenSocketCount;
     }
 
-    /**
-     * Create an {@link EventLoopGroup}, for epoll or nio. The {@code boostIoRatio} flag passes a hint to the netty
-     * event loop threads to optimize comsuming all the tasks from the netty channel before checking for IO activity.
-     * By default, netty will process some maximum number of tasks off it's queue before it will check for activity on
-     * any of the open FDs, which basically amounts to checking for any incoming data. If you have a class of event loops
-     * that that do almost *no* inbound activity (like cassandra's outbound channels), then it behooves us to have the
-     * outbound netty channel consume as many tasks as it can before making the system calls to check up on the FDs,
-     * as we're not expecting any incoming data on those sockets, anyways. Thus, we pass the magic value {@code 100}
-     * to achieve the maximum consuption from the netty queue. (for implementation details, as of netty 4.1.8,
-     * see {@link io.netty.channel.epoll.EpollEventLoop#run()}.
-     */
-    static EventLoopGroup getEventLoopGroup(boolean useEpoll, int threadCount, String threadNamePrefix, boolean boostIoRatio)
+    static EventLoopGroup getEventLoopGroup(boolean useEpoll, int threadCount, String threadNamePrefix)
     {
         if (useEpoll)
         {
             logger.debug("using netty epoll event loop for pool prefix {}", threadNamePrefix);
-            EpollEventLoopGroup eventLoopGroup = new EpollEventLoopGroup(threadCount, new DefaultThreadFactory(threadNamePrefix, true));
-            if (boostIoRatio)
-                eventLoopGroup.setIoRatio(100);
-            return eventLoopGroup;
+            return new EpollEventLoopGroup(threadCount, new DefaultThreadFactory(threadNamePrefix, true));
         }
 
         logger.debug("using netty nio event loop for pool prefix {}", threadNamePrefix);
-        NioEventLoopGroup eventLoopGroup = new NioEventLoopGroup(threadCount, new DefaultThreadFactory(threadNamePrefix, true));
-        if (boostIoRatio)
-            eventLoopGroup.setIoRatio(100);
-        return eventLoopGroup;
+        return new NioEventLoopGroup(threadCount, new DefaultThreadFactory(threadNamePrefix, true));
     }
 
     /**
