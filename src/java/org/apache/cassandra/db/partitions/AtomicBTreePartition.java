@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -65,6 +66,10 @@ public class AtomicBTreePartition extends AbstractBTreePartition
     // Note this is a shift, because dividing a long time and then picking the low 32 bits doesn't give correct rollover behavior
     private static final int CLOCK_SHIFT = 17;
     // CLOCK_GRANULARITY = 1^9ns >> CLOCK_SHIFT == 132us == (1/7.63)ms
+
+    // Replacement for Unsafe.monitorEnter/monitorExit.
+    private volatile ReentrantLock lock;
+    private static final AtomicReferenceFieldUpdater<AtomicBTreePartition, ReentrantLock> lockUpdater = AtomicReferenceFieldUpdater.newUpdater(AtomicBTreePartition.class, ReentrantLock.class, "lock");
 
     private static final AtomicIntegerFieldUpdater<AtomicBTreePartition> wasteTrackerUpdater = AtomicIntegerFieldUpdater.newUpdater(AtomicBTreePartition.class, "wasteTracker");
     private static final AtomicReferenceFieldUpdater<AtomicBTreePartition, Holder> refUpdater = AtomicReferenceFieldUpdater.newUpdater(AtomicBTreePartition.class, Holder.class, "ref");
@@ -169,7 +174,10 @@ public class AtomicBTreePartition extends AbstractBTreePartition
                     }
                     if (shouldLock)
                     {
-                        Locks.monitorEnterUnsafe(this);
+                        if (lock == null)
+                            lockUpdater.compareAndSet(this, null, new ReentrantLock());
+
+                        lock.lock();
                         monitorOwned = true;
                     }
                 }
@@ -179,7 +187,7 @@ public class AtomicBTreePartition extends AbstractBTreePartition
         {
             indexer.commit();
             if (monitorOwned)
-                Locks.monitorExitUnsafe(this);
+                lock.unlock();
         }
 
     }
