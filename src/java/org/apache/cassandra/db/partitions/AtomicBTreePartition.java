@@ -35,7 +35,6 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.btree.BTree;
 import org.apache.cassandra.utils.btree.UpdateFunction;
-import org.apache.cassandra.utils.concurrent.Locks;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.memory.HeapAllocator;
 import org.apache.cassandra.utils.memory.MemtableAllocator;
@@ -120,7 +119,9 @@ public class AtomicBTreePartition extends AbstractBTreePartition
         {
             if (usePessimisticLocking())
             {
-                Locks.monitorEnterUnsafe(this);
+                if (lock == null)
+                    lockUpdater.compareAndSet(this, null, new ReentrantLock());
+                lock.lock();
                 monitorOwned = true;
             }
 
