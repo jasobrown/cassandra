@@ -424,6 +424,11 @@ public class OutboundMessagingConnection
         boolean flushed = false;
         ChannelFuture future = null;
 
+        // these fields are for recording metrics, but without invoking the AtomicInteger compare-and-swap operation on the hot path
+        int dequeuedMessages = 0;
+        int sentMessages = 0;
+        int droppedMessages = 0;
+
         try
         {
             // check this once, outside of the for loop, as adding excess data is not a huge problem,
@@ -443,12 +448,12 @@ public class OutboundMessagingConnection
                     break;
                 }
 
-                backlogSize.decrementAndGet();
+                dequeuedMessages++;
 
                 if (!next.isTimedOut(timestampNanos))
                 {
                     future = channelWriter.write(next);
-                    future.addListener(f -> completedMessageCount.incrementAndGet());
+                    sentMessages++;
 
                     flushed = channelWriter.flush(!backlog.isEmpty());
                     if (flushed)
@@ -456,7 +461,7 @@ public class OutboundMessagingConnection
                 }
                 else
                 {
-                    droppedMessageCount.incrementAndGet();
+                    droppedMessages++;
                 }
 
                 // Check timeout every 8 tasks because nanoTime() is relatively expensive.
@@ -470,6 +475,14 @@ public class OutboundMessagingConnection
         }
         finally
         {
+            // only update the Atomic fields if we actually did anything
+            if (0 < dequeuedMessages)
+                backlogSize.addAndGet(-dequeuedMessages);
+            if (0 < sentMessages)
+                completedMessageCount.addAndGet(sentMessages);
+            if (0 < droppedMessages)
+                droppedMessageCount.addAndGet(droppedMessages);
+
             // TODO:JEB fix this comment -- note: we have to set the state back to IDLE if we did not send a message to channelWriter,
             // because there's no other component that will do it. handleMessageResult() sets the state correctly
             // when a message *is* written to the channleWriter
@@ -898,7 +911,7 @@ public class OutboundMessagingConnection
 
     public Integer getPendingMessages()
     {
-        return backlog.size();
+        return backlogSize.get();
     }
 
     public Long getCompletedMessages()
