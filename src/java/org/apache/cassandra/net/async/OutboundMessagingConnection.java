@@ -24,7 +24,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -73,13 +72,12 @@ import org.jctools.queues.MpscLinkedQueue;
  * state machine semantics. In brief, the state machine helps to signal between the producers and consumer task, as well
  * as ensuring only one consume task is executing (and only one connect operation is happening, as well).
  * Ignoring the connecting state, the basic state flow is:
- * IDLE -> ENQUEUED -> RUNNING -> IDLE.
+ * IDLE -> RUNNING -> (switch many times) -> CLOSED.
  *
- * The state begins at IDLE, then is transitioned either by a producer or the consumer to ENQUEUED, at which point
- * the consumer task is scheduled (or is already running). The consumer task then moves the state from ENQUEUED to RUNNING.
- * When the consumer is done writing to the netty channel, it moves the state back to IDLE. There is some special handling,
- * primarily in {@link #maybeEnqueueConsumerTask()}, to catch for races between producers and consumer wrt the {@link #backlog}
- * and changing the state.
+ * The state begins at IDLE, then is transitioned either by a producer or the consumer to RUNNING, at which point
+ * the consumer task is scheduled (or is already running). When the consumer is done writing to the netty channel,
+ * it moves the state back to IDLE. There is some special handling, primarily in {@link #maybeExecuteConsumerTask(boolean)},
+ * to catch for races between producers and consumer wrt the {@link #backlog} and changing the state.
  *
  * When reading this code, it is important to know what thread a given method will be invoked on. To that end,
  * the important methods have javadoc comments that state which thread they will/should execute on.
@@ -284,7 +282,7 @@ public class OutboundMessagingConnection
      */
     boolean sendMessage(QueuedMessage queuedMessage)
     {
-        if (isClosed())
+        if (state.isClosed())
             return false;
 
         maybeScheduleMessageExpiry(System.nanoTime());
@@ -299,7 +297,7 @@ public class OutboundMessagingConnection
         backlog.offer(queuedMessage);
         backlogSize.incrementAndGet();
 
-        if (state.set(State.STATE_IDLE, State.STATE_CONSUME_ENQUEUED))
+        if (state.set(State.STATE_IDLE, State.STATE_CONSUMING))
             eventLoop.submit(this::maybeStartDequeuing);
 
         return true;
@@ -333,7 +331,7 @@ public class OutboundMessagingConnection
         int expiredMessageCount = 0;
 
         // if this instance is closed, don't bother unsetting the backlogExpirationActive flag, as we never want to run again
-        if (isClosed())
+        if (state.isClosed())
             return expiredMessageCount;
 
         long timestampNanos = System.nanoTime();
@@ -377,7 +375,7 @@ public class OutboundMessagingConnection
      */
     private boolean maybeStartDequeuing()
     {
-        if (isClosed())
+        if (state.isClosed())
             return false;
 
         if (backlog.isEmpty())
@@ -388,29 +386,18 @@ public class OutboundMessagingConnection
 
         if (channelWriter == null || channelWriter.isClosed())
         {
-            if (state.set(State.STATE_IDLE))
-                reconnect();
+            if (state.set(State.STATE_CREATING_CONNECTION))
+                connect(true);
             return false;
         }
-
-        if (!state.set(State.STATE_CONSUME_ENQUEUED, State.STATE_CONSUME_RUNNING))
-            return false;
 
         return dequeueMessages();
     }
 
     /**
-     * Attempts to reschedule the consumer task if there are messages remaining. The key
-     */
-    private void maybeEnqueueConsumerTask()
-    {
-        if (!backlog.isEmpty() && state.set(State.STATE_IDLE, State.STATE_CONSUME_ENQUEUED))
-            eventLoop.submit(this::maybeStartDequeuing);
-    }
-
-    /**
      * Pull messages off the {@link #backlog} and write them to the netty channel until we can flush (or hit an upper bound).
-     * Assumes the {@link #channelWriter} and channel are properly established, and that we are in the RUNNING state.
+     * Assumes the {@link #channelWriter} and channel are properly established, and that we are in the
+     * {@link State#STATE_CONSUMING} state.
      *
      * This method must always call flush after the last message has been written to the queue,
      * else the callbacks (listeners on the {@link ChannelFuture}) will never be invoked.
@@ -420,25 +407,23 @@ public class OutboundMessagingConnection
     private boolean dequeueMessages()
     {
         final long timestampNanos = System.nanoTime();
-        long deadLineNanos = timestampNanos + MAX_TIME_DEQUEUING_NANOS;
+        final long deadLineNanos = timestampNanos + MAX_TIME_DEQUEUING_NANOS;
         boolean flushed = false;
         ChannelFuture future = null;
 
-        // these fields are for recording metrics, but without invoking the AtomicInteger compare-and-swap operation on the hot path
+        // these fields are for recording metrics, without invoking the AtomicInteger compare-and-swap on the hot path (in the loop below)
         int dequeuedMessages = 0;
         int sentMessages = 0;
         int droppedMessages = 0;
 
         try
         {
-            // check this once, outside of the for loop, as adding excess data is not a huge problem,
-            // especially in the common case of small messages (where 'less' is less than 1k).
-            if (!channelWriter.channel.isWritable())
-                return false;
-
             // we loop until we know a flush has been scheduled else we'll never get handleMessageResult() invoked
             for (int i = 0; i < MAX_DEQUEUE_COUNT; i++)
             {
+                if (!channelWriter.channel.isWritable())
+                    break;
+
                 QueuedMessage next = backlog.poll();
                 if (next == null)
                 {
@@ -471,7 +456,7 @@ public class OutboundMessagingConnection
         }
         catch (Exception e)
         {
-            // TODO:JEB do something here
+            logger.error("an error occurred while trying dequeue and process messages", e);
         }
         finally
         {
@@ -483,27 +468,52 @@ public class OutboundMessagingConnection
             if (0 < droppedMessages)
                 droppedMessageCount.addAndGet(droppedMessages);
 
-            // TODO:JEB fix this comment -- note: we have to set the state back to IDLE if we did not send a message to channelWriter,
-            // because there's no other component that will do it. handleMessageResult() sets the state correctly
-            // when a message *is* written to the channleWriter
+            // we are done sending messages for this consumer task instance, so reset the state for future executions/schedulings
             state.set(State.STATE_IDLE);
-            maybeEnqueueConsumerTask();
         }
 
         if (future != null)
         {
             if (!flushed)
-                // TODO:JEB rethink this. I can choose to reschedule the consumer task, and once it drains the queue it can flush,
-                // but the multuplexing of channels might get in the way (and delay the flush).
-                // otherwise, I am bounding the max number of messages before a flush to MAX_DEQUEUE_COUNT
-                channelWriter.channel.flush();
+            {
+                // Reschedule the consumer task, and once it drains the queue, it can flush.
+                // remember: the callbacks (promises) to be fulfilled when the msg/buffer is written to the socket
+                // can only be invoked after a flush()! just because we wrote to the channel doesn't mean we'll
+                // get any callbacks, thus, we need to reschedule the consumer task (and eventually flush will be called).
+                // this is an optimization to not call flush on every invocation of this method as that would effecitively
+                // bound the maximum number of messages to be sent between flushes to MAX_DEQUEUE_COUNT.
+                maybeExecuteConsumerTask(false);
+            }
 
-            // only add the result listener to the last message written to the pipeline as we don't need to try to
-            // enqueue the consumer task yet even more times.
+            // only add the result listener to the last message written to the pipeline to avoid over-scheduling the consumer task
+            // (the re-scheduling occurs in handleMessageResult())
             future.addListener(this::handleMessageResult);
             return true;
         }
+        else
+        {
+            // potentially reschedule the consumer task *only* in the case where we have not sent any messages,
+            // as the primary way to reschedule the consumer task for this peer/channel type should be via
+            // handleMessageResult(), but if we're not sending any messages on this run, let's be safe.
+            maybeExecuteConsumerTask(false);
+        }
         return false;
+    }
+
+    /**
+     * Attempts to run the consumer task if there are messages in the {@link #backlog}. Also, this handles the race condition
+     * with the producer thread where the state is set to IDLE after the prodcuer adds to the queue but before the producer
+     * can CAS the state to RUNNING (and schedule the consumer task).
+     */
+    private void maybeExecuteConsumerTask(boolean executeImmediately)
+    {
+        if (!backlog.isEmpty() && state.set(State.STATE_IDLE, State.STATE_CONSUMING))
+        {
+            if (executeImmediately)
+                maybeStartDequeuing();
+            else
+                eventLoop.submit(this::maybeStartDequeuing);
+        }
     }
 
     /**
@@ -519,7 +529,7 @@ public class OutboundMessagingConnection
         // clean up any lingering connection attempts
         cleanupConnectArtifacts(cancelTimeout);
 
-        if (isClosed())
+        if (state.isClosed())
             return false;
 
         logger.debug("{} connection attempt {}", loggingTag(), connectAttemptCount);
@@ -631,7 +641,7 @@ public class OutboundMessagingConnection
         ChannelFuture channelFuture = (ChannelFuture)future;
 
         // make sure this instance is not (terminally) closed
-        if (isClosed())
+        if (state.isClosed())
         {
             // we don't have a ChannelWriter just yet, so we have to go directly to the future's channel to close it
             channelFuture.channel().close();
@@ -678,7 +688,7 @@ public class OutboundMessagingConnection
     boolean connectionTimeout(ChannelFuture channelFuture)
     {
         cleanupConnectArtifacts(true);
-        if (isClosed())
+        if (state.isClosed())
             return false;
 
         if (logger.isDebugEnabled())
@@ -713,7 +723,7 @@ public class OutboundMessagingConnection
             case SUCCESS:
                 assert result.channelWriter != null;
 
-                if (isClosed() || result.channelWriter.isClosed())
+                if (state.isClosed() || result.channelWriter.isClosed())
                 {
                     result.channelWriter.close();
                     state.set(State.STATE_IDLE);
@@ -734,8 +744,8 @@ public class OutboundMessagingConnection
                 if (previousChannelWriter != null)
                     previousChannelWriter.close();
 
-                if (state.set(State.STATE_CONSUME_ENQUEUED))
-                    maybeStartDequeuing();
+                if (state.set(State.STATE_CONSUMING))
+                    dequeueMessages();
                 break;
             case DISCONNECT:
                 state.set(State.STATE_IDLE);
@@ -788,14 +798,14 @@ public class OutboundMessagingConnection
      */
     void handleMessageResult(Future<? super Void> future)
     {
-        if (isClosed())
+        if (state.isClosed())
             return;
 
         // checking the cause() is an optimized way to tell if the operation was successful (as the cause will be null)
         Throwable cause = future.cause();
         if (cause == null)
         {
-            maybeEnqueueConsumerTask();
+            maybeExecuteConsumerTask(true);
             return;
         }
 
@@ -819,7 +829,7 @@ public class OutboundMessagingConnection
             logger.error("{} Unexpected error writing", loggingTag(), cause);
         }
 
-        maybeEnqueueConsumerTask();
+        maybeExecuteConsumerTask(true);
     }
 
 
@@ -843,7 +853,7 @@ public class OutboundMessagingConnection
     void reconnectWithNewIp(InetAddressAndPort newAddr)
     {
         // if we're closed, ignore the request
-        if (isClosed())
+        if (state.isClosed())
             return;
 
         // capture a reference to the current channel, in case it gets swapped out before we can call close() on it
@@ -880,7 +890,7 @@ public class OutboundMessagingConnection
      */
     public void close(boolean softClose)
     {
-        if (isClosed())
+        if (state.isClosed())
             return;
 
         if (!softClose)
@@ -976,67 +986,50 @@ public class OutboundMessagingConnection
         return channelWriter != null;
     }
 
-    public boolean isClosed()
+    boolean isClosed()
     {
-        return state.state == State.STATE_CLOSED;
+        return state.isClosed();
     }
 
     // For testing only!!
     void setState(int nextState)
     {
-        State.stateUpdater.set(state, nextState);
+        state.state.set(nextState);
     }
 
     int getState()
     {
-        return state.state;
+        return state.state.get();
     }
 
+    /**
+     * Wrapper for managing the state machine of this instance. Any state may transition to any another,
+     * except {@link #STATE_CLOSED}; it may not be transitioned away from as it is a final state.
+     */
     static class State
     {
         /**
          * An initial/idle state; the {@link OutboundMessagingConnection#channelWriter} may or may not be established yet.
-         * May transition to:
-         * - {@link #STATE_CREATING_CONNECTION}
-         * - {@link #STATE_CONSUME_ENQUEUED}
-         * - {@link #STATE_CLOSED}
          */
         static final int STATE_IDLE = 0;
 
         /**
          * State to indicate that a new connection/channel is being created
-         * May transition to:
-         * - {@link #STATE_IDLE}
-         * - {@link #STATE_CONSUME_ENQUEUED}
-         * - {@link #STATE_CLOSED}
          */
         static final int STATE_CREATING_CONNECTION = 1;
 
         /**
-         * State to indicate that the consume task has been enqueued
-         * May transition to:
-         * - {@link #STATE_IDLE}
-         * - {@link #STATE_CONSUME_RUNNING}
-         * - {@link #STATE_CLOSED}
-         */
-        static final int STATE_CONSUME_ENQUEUED = 2;
-
-        /**
          * State to indicate that the consume task is executing.
-         * May transition to:
-         * - {@link #STATE_IDLE}
-         * - {@link #STATE_CLOSED}
          */
-        static final int STATE_CONSUME_RUNNING = 3;
+        static final int STATE_CONSUMING = 2;
 
         /**
          * State to indicate this instance is closed (not creatng new connections, should not accept more messages).
          * This is a final state and cannot be transitioned away from.
          */
-        static final int STATE_CLOSED = 4;
+        static final int STATE_CLOSED = 3;
 
-        volatile int state;
-        private static final AtomicIntegerFieldUpdater<State> stateUpdater = AtomicIntegerFieldUpdater.newUpdater(State.class, "state");
+        private final AtomicInteger state;
 
         private State()
         {
@@ -1045,54 +1038,44 @@ public class OutboundMessagingConnection
 
         State(int state)
         {
-            this.state = state;
+            this.state = new AtomicInteger(state);
         }
 
         boolean set(int nextState)
         {
-            int currentState = state;
-            return isValidTransition(currentState, nextState) && stateUpdater.compareAndSet(this, currentState, nextState);
-        }
-
-        /**
-         * Ensure state transitions are valid. A state is allowed to transition to itself.
-         */
-        static boolean isValidTransition(int initial, int next)
-        {
-            if (initial == next)
-                return true;
-
-            switch (initial)
-            {
-                case STATE_CLOSED:
-                    return false;
-                case STATE_IDLE:
-                    return next != STATE_CONSUME_RUNNING;
-                case STATE_CONSUME_ENQUEUED:
-                    return next != STATE_CREATING_CONNECTION;
-                case STATE_CONSUME_RUNNING:
-                    return next == STATE_IDLE || next == STATE_CLOSED;
-                case STATE_CREATING_CONNECTION:
-                    return next != STATE_CONSUME_RUNNING;
-                default:
-                    throw new IllegalArgumentException("unknown starting state: " + initial);
-            }
+            int currentState = state.get();
+            return currentState != STATE_CLOSED &&
+                   (currentState == nextState || state.compareAndSet(currentState, nextState));
         }
 
         boolean set(int expectedState, int nextState)
         {
-            return isValidTransition(expectedState, nextState) && stateUpdater.compareAndSet(this, expectedState, nextState);
+            int currentState = state.get();
+            return currentState != STATE_CLOSED &&
+                   currentState == expectedState &&
+                   state.compareAndSet(expectedState, nextState);
+        }
+
+        @VisibleForTesting
+        void unsafeSet(int nextState)
+        {
+            state.set(nextState);
         }
 
         void close()
         {
-            stateUpdater.set(this, STATE_CLOSED);
+            state.set(STATE_CLOSED);
+        }
+
+        boolean isClosed()
+        {
+            return state.get() == State.STATE_CLOSED;
         }
 
         @Override
         public String toString()
         {
-            return Integer.toString(state);
+            return state.toString();
         }
     }
 }
