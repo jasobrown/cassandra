@@ -50,15 +50,14 @@ import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.MessagingServiceTest;
 import org.apache.cassandra.net.async.OutboundHandshakeHandler.HandshakeResult;
+import org.apache.cassandra.net.async.OutboundMessagingConnection.State;
 
 import static org.apache.cassandra.net.MessagingService.Verb.ECHO;
 import static org.apache.cassandra.net.MessagingService.Verb.REQUEST_RESPONSE;
 import static org.apache.cassandra.net.async.OutboundMessagingConnection.State.STATE_CLOSED;
-import static org.apache.cassandra.net.async.OutboundMessagingConnection.State.STATE_CONSUME_ENQUEUED;
-import static org.apache.cassandra.net.async.OutboundMessagingConnection.State.STATE_CONSUME_RUNNING;
+import static org.apache.cassandra.net.async.OutboundMessagingConnection.State.STATE_CONSUMING;
 import static org.apache.cassandra.net.async.OutboundMessagingConnection.State.STATE_CREATING_CONNECTION;
 import static org.apache.cassandra.net.async.OutboundMessagingConnection.State.STATE_IDLE;
-import static org.apache.cassandra.net.async.OutboundMessagingConnection.State.isValidTransition;
 
 public class OutboundMessagingConnectionTest
 {
@@ -115,7 +114,7 @@ public class OutboundMessagingConnectionTest
     public void sendMessage_CreatingChannel()
     {
         assertBacklogSizes(0);
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         Assert.assertTrue(omc.sendMessage(new MessageOut<>(ECHO), 1));
         assertBacklogSizes(1);
     }
@@ -133,7 +132,7 @@ public class OutboundMessagingConnectionTest
         omc.setState(STATE_IDLE);
         Assert.assertTrue(omc.sendMessage(new MessageOut<>(ECHO), 1));
         assertBacklogSizes(1);
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
     }
 
 
@@ -285,9 +284,9 @@ public class OutboundMessagingConnectionTest
     @Test
     public void connect_ConnectionAlreadyStarted()
     {
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         omc.reconnect();
-        Assert.assertSame(STATE_CONSUME_RUNNING, omc.getState());
+        Assert.assertSame(STATE_CONSUMING, omc.getState());
     }
 
     @Test
@@ -301,7 +300,7 @@ public class OutboundMessagingConnectionTest
     @Test
     public void connectionTimeout_StateIsReady()
     {
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         ChannelFuture channelFuture = channel.newPromise();
         Assert.assertTrue(omc.connectionTimeout(channelFuture));
         Assert.assertTrue(channelWriter.isClosed());
@@ -325,7 +324,7 @@ public class OutboundMessagingConnectionTest
             omc.addToBacklog(new QueuedMessage(new MessageOut<>(ECHO), i));
         assertBacklogSizes(count);
 
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         ChannelFuture channelFuture = channel.newPromise();
         Assert.assertTrue(omc.connectionTimeout(channelFuture));
         Assert.assertEquals(STATE_IDLE, omc.getState());
@@ -335,7 +334,7 @@ public class OutboundMessagingConnectionTest
     @Test
     public void connectCallback_FutureIsSuccess()
     {
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         ChannelPromise promise = channel.newPromise();
         promise.setSuccess();
         Assert.assertTrue(omc.connectCallback(promise));
@@ -354,9 +353,9 @@ public class OutboundMessagingConnectionTest
     {
         ChannelPromise promise = channel.newPromise();
         promise.setFailure(new SSLHandshakeException("test is only a test"));
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         Assert.assertFalse(omc.connectCallback(promise));
-        Assert.assertEquals(STATE_CONSUME_RUNNING, omc.getState());
+        Assert.assertEquals(STATE_CONSUMING, omc.getState());
     }
 
     @Test
@@ -364,7 +363,7 @@ public class OutboundMessagingConnectionTest
     {
         ChannelPromise promise = channel.newPromise();
         promise.setFailure(new NullPointerException("test is only a test"));
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         Assert.assertFalse(omc.connectCallback(promise));
         Assert.assertEquals(STATE_IDLE, omc.getState());
     }
@@ -374,9 +373,9 @@ public class OutboundMessagingConnectionTest
     {
         ChannelPromise promise = channel.newPromise();
         promise.setFailure(new IOException("test is only a test"));
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         Assert.assertFalse(omc.connectCallback(promise));
-        Assert.assertEquals(STATE_CONSUME_RUNNING, omc.getState());
+        Assert.assertEquals(STATE_CONSUMING, omc.getState());
     }
 
     @Test
@@ -448,58 +447,47 @@ public class OutboundMessagingConnectionTest
     @Test
     public void setState_IDLE()
     {
-        Assert.assertTrue(isValidTransition(STATE_IDLE, STATE_IDLE));
-        Assert.assertTrue(isValidTransition(STATE_IDLE, STATE_CONSUME_ENQUEUED));
-        Assert.assertFalse(isValidTransition(STATE_IDLE, STATE_CONSUME_RUNNING));
-        Assert.assertTrue(isValidTransition(STATE_IDLE, STATE_CREATING_CONNECTION));
-        Assert.assertTrue(isValidTransition(STATE_IDLE, STATE_CLOSED));
-    }
-
-    @Test
-    public void setState_CONSUME_ENQUEUED()
-    {
-        Assert.assertTrue(isValidTransition(STATE_CONSUME_ENQUEUED, STATE_IDLE));
-        Assert.assertTrue(isValidTransition(STATE_CONSUME_ENQUEUED, STATE_CONSUME_ENQUEUED));
-        Assert.assertTrue(isValidTransition(STATE_CONSUME_ENQUEUED, STATE_CONSUME_RUNNING));
-        Assert.assertFalse(isValidTransition(STATE_CONSUME_ENQUEUED, STATE_CREATING_CONNECTION));
-        Assert.assertTrue(isValidTransition(STATE_CONSUME_ENQUEUED, STATE_CLOSED));
-    }
-
-    @Test
-    public void setState_CONSUME_RUNNING()
-    {
-        Assert.assertTrue(isValidTransition(STATE_CONSUME_RUNNING, STATE_IDLE));
-        Assert.assertFalse(isValidTransition(STATE_CONSUME_RUNNING, STATE_CONSUME_ENQUEUED));
-        Assert.assertTrue(isValidTransition(STATE_CONSUME_RUNNING, STATE_CONSUME_RUNNING));
-        Assert.assertFalse(isValidTransition(STATE_CONSUME_RUNNING, STATE_CREATING_CONNECTION));
-        Assert.assertTrue(isValidTransition(STATE_CONSUME_RUNNING, STATE_CLOSED));
+        setState(STATE_IDLE);
     }
 
     @Test
     public void setState_CREATING_CONNECTION()
     {
-        Assert.assertTrue(isValidTransition(STATE_CREATING_CONNECTION, STATE_IDLE));
-        Assert.assertTrue(isValidTransition(STATE_CREATING_CONNECTION, STATE_CONSUME_ENQUEUED));
-        Assert.assertFalse(isValidTransition(STATE_CREATING_CONNECTION, STATE_CONSUME_RUNNING));
-        Assert.assertTrue(isValidTransition(STATE_CREATING_CONNECTION, STATE_CREATING_CONNECTION));
-        Assert.assertTrue(isValidTransition(STATE_CREATING_CONNECTION, STATE_CLOSED));
+        setState(STATE_CREATING_CONNECTION);
+    }
+
+    @Test
+    public void setState_CONSUMING()
+    {
+        setState(STATE_CONSUMING);
+    }
+
+    private void setState(int targetState)
+    {
+        State state = new State(targetState);
+        Assert.assertTrue(state.set(targetState, STATE_IDLE));
+        state.unsafeSet(targetState);
+        Assert.assertTrue(state.set(targetState, STATE_CREATING_CONNECTION));
+        state.unsafeSet(targetState);
+        Assert.assertTrue(state.set(targetState, STATE_CONSUMING));
+        state.unsafeSet(targetState);
+        Assert.assertTrue(state.set(targetState, STATE_CLOSED));
     }
 
     @Test
     public void setState_CLOSED()
     {
-        Assert.assertFalse(isValidTransition(STATE_CLOSED, STATE_IDLE));
-        Assert.assertFalse(isValidTransition(STATE_CLOSED, STATE_CONSUME_ENQUEUED));
-        Assert.assertFalse(isValidTransition(STATE_CLOSED, STATE_CONSUME_RUNNING));
-        Assert.assertFalse(isValidTransition(STATE_CLOSED, STATE_CREATING_CONNECTION));
-        Assert.assertTrue(isValidTransition(STATE_CLOSED, STATE_CLOSED));
+        State state = new State(STATE_CLOSED);
+        Assert.assertFalse(state.set(STATE_CLOSED, STATE_IDLE));
+        Assert.assertFalse(state.set(STATE_CLOSED, STATE_CONSUMING));
+        Assert.assertFalse(state.set(STATE_CLOSED, STATE_CREATING_CONNECTION));
     }
 
     @Test
     public void reconnectWithNewIp_HappyPath()
     {
         omc.setChannelWriter(channelWriter);
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         OutboundConnectionIdentifier originalId = omc.getConnectionId();
         omc.reconnectWithNewIp(RECONNECT_ADDR);
         Assert.assertFalse(omc.getConnectionId().equals(originalId));
@@ -520,11 +508,11 @@ public class OutboundMessagingConnectionTest
     @Test
     public void reconnectWithNewIp_UnsedConnection()
     {
-        omc.setState(STATE_CONSUME_RUNNING);
+        omc.setState(STATE_CONSUMING);
         OutboundConnectionIdentifier originalId = omc.getConnectionId();
         omc.reconnectWithNewIp(RECONNECT_ADDR);
         Assert.assertNotSame(omc.getConnectionId(), originalId);
-        Assert.assertSame(STATE_CONSUME_RUNNING, omc.getState());
+        Assert.assertSame(STATE_CONSUMING, omc.getState());
     }
 
     @Test
