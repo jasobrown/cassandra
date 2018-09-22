@@ -24,7 +24,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -35,6 +34,7 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.EventLoop;
+import io.netty.channel.SingleThreadEventLoop;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
@@ -424,7 +424,7 @@ public class OutboundMessagingConnection
         boolean flushed = false;
         ChannelFuture future = null;
 
-        // these fields are for recording metrics, but without invoking the AtomicInteger compare-and-swap operation on the hot path
+        // these fields are for recording metrics, without invoking the AtomicInteger compare-and-swap on the hot path (in the loop below)
         int dequeuedMessages = 0;
         int sentMessages = 0;
         int droppedMessages = 0;
@@ -487,21 +487,33 @@ public class OutboundMessagingConnection
             // because there's no other component that will do it. handleMessageResult() sets the state correctly
             // when a message *is* written to the channleWriter
             state.set(State.STATE_IDLE);
-            maybeEnqueueConsumerTask();
         }
 
         if (future != null)
         {
             if (!flushed)
+            {
                 // TODO:JEB rethink this. I can choose to reschedule the consumer task, and once it drains the queue it can flush,
                 // but the multuplexing of channels might get in the way (and delay the flush).
-                // otherwise, I am bounding the max number of messages before a flush to MAX_DEQUEUE_COUNT
+                // otherwise, I am bounding the max number of messages before a flush to MAX_DEQUEUE_COUNT.
+                // remember: the callbacks to be fulfilled when the msg/buffer is written to the socket
+                // can only be invoked after a flush()!
                 channelWriter.channel.flush();
+            }
 
             // only add the result listener to the last message written to the pipeline as we don't need to try to
             // enqueue the consumer task yet even more times.
             future.addListener(this::handleMessageResult);
             return true;
+        }
+        else
+        {
+            // TODO:JEB fix this comment:: potentially reschedule the consumer task *only* in the case where we have not sent any messages,
+            // as the primary way to reschedule the consumer task for this peer/channel type should be via
+            // handleMessageResult(), but this handles the race condition with the producer thread where we
+            // set the state to IDLE (in this method) after the prodcuer adds to the queue but before it can CAS
+            // the state to ENQUEUED
+            maybeEnqueueConsumerTask();
         }
         return false;
     }
@@ -978,18 +990,18 @@ public class OutboundMessagingConnection
 
     public boolean isClosed()
     {
-        return state.state == State.STATE_CLOSED;
+        return state.state.get() == State.STATE_CLOSED;
     }
 
     // For testing only!!
     void setState(int nextState)
     {
-        State.stateUpdater.set(state, nextState);
+        state.state.set(nextState);
     }
 
     int getState()
     {
-        return state.state;
+        return state.state.get();
     }
 
     static class State
@@ -1035,8 +1047,7 @@ public class OutboundMessagingConnection
          */
         static final int STATE_CLOSED = 4;
 
-        volatile int state;
-        private static final AtomicIntegerFieldUpdater<State> stateUpdater = AtomicIntegerFieldUpdater.newUpdater(State.class, "state");
+        AtomicInteger state;
 
         private State()
         {
@@ -1045,13 +1056,13 @@ public class OutboundMessagingConnection
 
         State(int state)
         {
-            this.state = state;
+            this.state = new AtomicInteger(state);
         }
 
         boolean set(int nextState)
         {
-            int currentState = state;
-            return isValidTransition(currentState, nextState) && stateUpdater.compareAndSet(this, currentState, nextState);
+            int currentState = state.get();
+            return isValidTransition(currentState, nextState) && state.compareAndSet(currentState, nextState);
         }
 
         /**
@@ -1081,18 +1092,20 @@ public class OutboundMessagingConnection
 
         boolean set(int expectedState, int nextState)
         {
-            return isValidTransition(expectedState, nextState) && stateUpdater.compareAndSet(this, expectedState, nextState);
+            return state.get() == expectedState &&
+                   isValidTransition(expectedState, nextState) &&
+                   state.compareAndSet(expectedState, nextState);
         }
 
         void close()
         {
-            stateUpdater.set(this, STATE_CLOSED);
+            state.set(STATE_CLOSED);
         }
 
         @Override
         public String toString()
         {
-            return Integer.toString(state);
+            return state.toString();
         }
     }
 }
