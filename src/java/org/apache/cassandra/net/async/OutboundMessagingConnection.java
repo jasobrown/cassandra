@@ -395,7 +395,6 @@ public class OutboundMessagingConnection
         // these fields are for recording metrics, without invoking the AtomicInteger compare-and-swap on the hot path (in the loop below)
         int dequeuedMessages = 0;
         int sentMessages = 0;
-        int droppedMessages = 0;
 
         try
         {
@@ -425,17 +424,13 @@ public class OutboundMessagingConnection
                     if (flushed)
                         break;
                 }
-                else
-                {
-                    droppedMessages++;
-                }
 
                 // Check timeout every 8 tasks because nanoTime() is relatively expensive.
                 if ((i & 0x7) == 0 && deadLineNanos <= System.nanoTime())
                     break;
             }
         }
-        catch (Exception e)
+        catch (Throwable e)
         {
             logger.error("an error occurred while trying dequeue and process messages", e);
         }
@@ -446,31 +441,46 @@ public class OutboundMessagingConnection
                 backlogSize.addAndGet(-dequeuedMessages);
             if (0 < sentMessages)
                 completedMessageCount.addAndGet(sentMessages);
+            int droppedMessages = dequeuedMessages - sentMessages;
             if (0 < droppedMessages)
                 droppedMessageCount.addAndGet(droppedMessages);
         }
 
+        // this method *always* needs to exit with some resumable state for the consumer task:
+        // - backlog is empty (so producers can reschedule)
+        // - the listener is added to the last message that was sent *and then flush is called*
+        // - the consumer task is rescheduled: either because we have not flushed or we didn't send any messages
         if (future != null)
         {
-            if (!flushed)
+            // always add the listener on the last message before a flush
+            if (flushed)
             {
-                // Reschedule the consumer task, and once it drains the queue, it can flush.
-                // remember: the callbacks (promises) to be fulfilled when the msg/buffer is written to the socket
-                // can only be invoked after a flush()! just because we wrote to the channel doesn't mean we'll
-                // get any callbacks, thus, we need to reschedule the consumer task (and eventually flush will be called).
-                // this is an optimization to not call flush on every invocation of this method as that would effecitively
-                // bound the maximum number of messages to be sent between flushes to MAX_DEQUEUE_COUNT.
+                future.addListener(this::handleMessageResult);
+            }
+            // if we are no longer writable after adding messages to the channel but haven't flushed, force a flush (and add the listener)
+            else if (backlogSize.get() > 0 && !channelWriter.channel.isWritable())
+            {
+                future.addListener(this::handleMessageResult);
+                channelWriter.channel.flush();
+            }
+            // if we get here, we know we sent a message, but we didn't explicitly flush. rescheudle a consumer task
+            // which will
+            else // !flushed || backlogSize > 0
+            {
                 eventLoop.submit(this::maybeStartDequeuing);
             }
-
-            // only add the result listener to the last message written to the pipeline to avoid over-scheduling the consumer task
-            // (the re-scheduling occurs in handleMessageResult())
-            future.addListener(this::handleMessageResult);
-            return true;
         }
-        return false;
-    }
+        else if (backlogSize.get() > 0)
+        {
+            // this is the case where we didn't send any messages: either because the backlog was empty (not likely),
+            // or we read a bunch of timed out messages and either hit the deadline or hit the MAX_DEQUEUE_COUNT
+            eventLoop.submit(this::maybeStartDequeuing);
+        }
+        // else - we didn't send messages and backlog is empty - nothing to do here as next enqueued
+        // message at sendMessage will schedule the consumer task
 
+        return sentMessages > 0;
+    }
 
     /**
      * Handles the result of sending each message. This function will be invoked when all of the bytes of the message have
@@ -671,10 +681,8 @@ public class OutboundMessagingConnection
                 connectAttemptCount++;
                 connectionRetryFuture = eventLoop.schedule(() -> connect(false), OPEN_RETRY_DELAY_MS * connectAttemptCount, TimeUnit.MILLISECONDS);
             }
-            else
-            {
-                maybeReconnect();
-            }
+            // if we've met the MAX_RECONNECT_ATTEMPTS, don't bother to schedule anything as the connectionTimeout will kick in
+            // and change enough state to allow future reconnect attempts
         }
         else
         {
@@ -697,22 +705,15 @@ public class OutboundMessagingConnection
      * A callback for handling timeouts when creating a connection/negotiating the handshake.
      *
      * Note: this method is invoked from the netty event loop.
-     *
-     * @return true if there was a timeout on the connect/handshake; else false.
      */
-    boolean connectionTimeout(ChannelFuture channelFuture)
+    void connectionTimeout(ChannelFuture channelFuture)
     {
-        cleanupConnectArtifacts(true);
-        if (closed)
-            return false;
-
         if (logger.isDebugEnabled())
             logger.debug("{} timed out while trying to connect", loggingTag());
 
-        maybeReconnect();
+        cleanupConnectArtifacts(true);
         channelFuture.channel().close();
         purgeBacklog();
-        return true;
     }
 
     /**
@@ -733,31 +734,28 @@ public class OutboundMessagingConnection
             MessagingService.instance().setVersion(connectionId.remote(), targetVersion);
         }
 
+        if (closed)
+        {
+            if (result.channelWriter != null)
+                result.channelWriter.close();
+            purgeBacklog();
+            return;
+        }
+
         switch (result.outcome)
         {
             case SUCCESS:
-                assert result.channelWriter != null;
-
-                if (closed || result.channelWriter.isClosed())
-                {
-                    result.channelWriter.close();
-                    purgeBacklog();
-                    break;
-                }
-
                 if (logger.isDebugEnabled())
                 {
                     logger.debug("{} successfully connected, compress = {}, coalescing = {}", loggingTag(),
                                  shouldCompressConnection(connectionId.local(), connectionId.remote()),
                                  coalescingStrategy != null ? coalescingStrategy : CoalescingStrategies.Strategy.DISABLED);
                 }
-                result.channelWriter.channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).set(false);
 
-                ChannelWriter previousChannelWriter = channelWriter;
+                if (channelWriter != null)
+                    channelWriter.close();
                 channelWriter = result.channelWriter;
-                if (previousChannelWriter != null)
-                    previousChannelWriter.close();
-
+                channelWriter.channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).set(false);
                 dequeueMessages();
                 break;
             case DISCONNECT:
@@ -767,7 +765,7 @@ public class OutboundMessagingConnection
                 purgeBacklog();
                 break;
             default:
-                throw new IllegalArgumentException("unhandled result type: " + result.outcome);
+                throw new AssertionError("unhandled result type: " + result.outcome);
         }
     }
 
@@ -825,8 +823,8 @@ public class OutboundMessagingConnection
 
     private void purgeBacklog()
     {
-        backlog.clear();
         int droppedCount = backlogSize.getAndSet(0);
+        backlog.clear();
         droppedMessageCount.addAndGet(droppedCount);
     }
 

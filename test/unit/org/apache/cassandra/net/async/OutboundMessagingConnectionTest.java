@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+
 import javax.net.ssl.SSLHandshakeException;
 
 import com.google.common.net.InetAddresses;
@@ -49,7 +50,6 @@ import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.MessagingServiceTest;
-import org.apache.cassandra.net.async.OutboundHandshakeHandler.HandshakeResult;
 
 import static org.apache.cassandra.net.MessagingService.Verb.ECHO;
 import static org.apache.cassandra.net.MessagingService.Verb.REQUEST_RESPONSE;
@@ -253,11 +253,8 @@ public class OutboundMessagingConnectionTest
             }
 
             public void validateConfiguration() throws ConfigurationException
-            {
-
-            }
+            { }
         };
-
 
         MessageOut messageOut = new MessageOut(MessagingService.Verb.GOSSIP_DIGEST_ACK);
         OutboundMessagingPool pool = new OutboundMessagingPool(REMOTE_ADDR, LOCAL_ADDR, null,
@@ -272,79 +269,50 @@ public class OutboundMessagingConnectionTest
         Assert.assertFalse(ms.channelManagers.containsKey(REMOTE_ADDR));
     }
 
-//    @Test
-//    public void connect_ConnectionAlreadyStarted()
-//    {
-//        omc.connect();
-//    }
-
-//    @Test
-//    public void connect_ConnectionClosed()
-//    {
-//        omc.unsafeSetClosed(true);
-//        omc.connect(true);
-//        Assert.assertTrue(omc.isClosed());
-//        Assert.assertFalse(omc.isConnected());
-//    }
-
     @Test
-    public void connectionTimeout_StateIsReady()
-    {
-        ChannelFuture channelFuture = channel.newPromise();
-        Assert.assertTrue(omc.connectionTimeout(channelFuture));
-        Assert.assertTrue(channelWriter.isClosed());
-    }
-
-    @Test
-    public void connectionTimeout_StateIsClosed()
+    public void connect_ConnectionClosed()
     {
         omc.unsafeSetClosed(true);
-        ChannelFuture channelFuture = channel.newPromise();
-        Assert.assertFalse(omc.connectionTimeout(channelFuture));
+        omc.connect(true);
         Assert.assertTrue(omc.isClosed());
     }
 
-//    @Test
-//    public void connectionTimeout_AssumeConnectionTimedOut()
-//    {
-//        int count = 32;
-//        for (int i = 0; i < count; i++)
-//            omc.addToBacklog(new QueuedMessage(new MessageOut<>(ECHO), i));
-//        assertBacklogSizes(count);
-//
-//        omc.setState(STATE_CONSUMING);
-//        ChannelFuture channelFuture = channel.newPromise();
-//        Assert.assertTrue(omc.connectionTimeout(channelFuture));
-//        Assert.assertEquals(STATE_IDLE, omc.getState());
-//        assertBacklogSizes(0);
-//    }
-//
-//    @Test
-//    public void connectCallback_FutureIsSuccess()
-//    {
-//        omc.setState(STATE_CONSUMING);
-//        ChannelPromise promise = channel.newPromise();
-//        promise.setSuccess();
-//        Assert.assertTrue(omc.connectCallback(promise));
-//    }
-//
-//    @Test
-//    public void connectCallback_Closed()
-//    {
-//        ChannelPromise promise = channel.newPromise();
-//        omc.setState(STATE_CLOSED);
-//        Assert.assertFalse(omc.connectCallback(promise));
-//    }
-//
-//    @Test
-//    public void connectCallback_FailCauseIsSslHandshake()
-//    {
-//        ChannelPromise promise = channel.newPromise();
-//        promise.setFailure(new SSLHandshakeException("test is only a test"));
-//        omc.setState(STATE_CONSUMING);
-//        Assert.assertFalse(omc.connectCallback(promise));
-//        Assert.assertEquals(STATE_CONSUMING, omc.getState());
-//    }
+    @Test
+    public void connectionTimeout()
+    {
+        int count = 32;
+        for (int i = 0; i < count; i++)
+            omc.addToBacklog(new QueuedMessage(new MessageOut<>(ECHO), i));
+        assertBacklogSizes(count);
+
+        ChannelFuture channelFuture = channel.newPromise();
+        omc.connectionTimeout(channelFuture);
+        assertBacklogSizes(0);
+    }
+
+    @Test
+    public void connectCallback_FutureIsSuccess()
+    {
+        ChannelPromise promise = channel.newPromise();
+        promise.setSuccess();
+        Assert.assertTrue(omc.connectCallback(promise));
+    }
+
+    @Test
+    public void connectCallback_Closed()
+    {
+        omc.unsafeSetClosed(true);
+        ChannelPromise promise = channel.newPromise();
+        Assert.assertFalse(omc.connectCallback(promise));
+    }
+
+    @Test
+    public void connectCallback_FailCauseIsSslHandshake()
+    {
+        ChannelPromise promise = channel.newPromise();
+        promise.setFailure(new SSLHandshakeException("test is only a test"));
+        Assert.assertFalse(omc.connectCallback(promise));
+    }
 //
 //    @Test
 //    public void connectCallback_FailCauseIsNPE()
