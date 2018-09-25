@@ -98,7 +98,7 @@ public class OutboundMessagingConnection
     /**
      * Some (artificial) max number of time to attempt to connect at a given time.
      */
-    private static final int MAX_RECONNECT_ATTEMPTS = 10;
+    static final int MAX_RECONNECT_ATTEMPTS = 10;
 
     private static final String BACKLOG_PURGE_SIZE_PROPERTY = Config.PROPERTY_PREFIX + "otc_backlog_purge_size";
     private static final int BACKLOG_PURGE_SIZE = Integer.getInteger(BACKLOG_PURGE_SIZE_PROPERTY, 1024);
@@ -112,7 +112,7 @@ public class OutboundMessagingConnection
      * An upper bound on the number of messages to dequeue, in order to cooperatively make use of the {@link #eventLoop}
      * (and not starve out other tasks on the same event loop).
      */
-    private static final int MAX_DEQUEUE_COUNT = 32;
+    static final int MAX_DEQUEUE_COUNT = 32;
 
     private static final long MAX_TIME_DEQUEUING_NANOS = TimeUnit.MICROSECONDS.toNanos(500);
 
@@ -173,13 +173,15 @@ public class OutboundMessagingConnection
     /**
      * A future for retrying connections.
      */
-    private ScheduledFuture<?> connectionRetryFuture;
+    @VisibleForTesting
+    ScheduledFuture<?> connectionRetryFuture;
 
     /**
      * A future for notifying when the timeout for creating the connection and negotiating the handshake has elapsed.
      * It will be cancelled when the channel is established correctly. This future executes in the netty event loop.
      */
-    private ScheduledFuture<?> connectionTimeoutFuture;
+    @VisibleForTesting
+    ScheduledFuture<?> connectionTimeoutFuture;
 
     private final CoalescingStrategy coalescingStrategy;
 
@@ -194,7 +196,8 @@ public class OutboundMessagingConnection
      *
      * As it is only referenced on the event loop, this field does not need to be volatile.
      */
-    private int connectAttemptCount;
+    @VisibleForTesting
+    int connectAttemptCount;
 
     /**
      * The netty channel, once a socket connection is established; it won't be in it's normal working state until the
@@ -347,6 +350,11 @@ public class OutboundMessagingConnection
                 logger.trace("{} Expiration took {}μs, and expired {} messages", loggingTag(), duration, expiredMessageCount);
             }
         }
+        catch (Throwable t)
+        {
+            // this really shouldn't fail, but don't allow the state to get all messed up; so just log any errors
+            logger.warn("{} problem while trying to expire backlogged messages; ignoring", loggingTag());
+        }
         finally
         {
             long backlogExpirationIntervalNanos = TimeUnit.MILLISECONDS.toNanos(DatabaseDescriptor.getOtcBacklogExpirationInterval());
@@ -385,7 +393,7 @@ public class OutboundMessagingConnection
      *
      * Note: executes on the netty event loop.
      */
-    private boolean dequeueMessages()
+    boolean dequeueMessages()
     {
         final long timestampNanos = System.nanoTime();
         final long deadLineNanos = timestampNanos + MAX_TIME_DEQUEUING_NANOS;
@@ -398,7 +406,6 @@ public class OutboundMessagingConnection
 
         try
         {
-            // we loop until we know a flush has been scheduled else we'll never get handleMessageResult() invoked
             for (int i = 0; i < MAX_DEQUEUE_COUNT; i++)
             {
                 if (!channelWriter.channel.isWritable())
@@ -426,7 +433,7 @@ public class OutboundMessagingConnection
                 }
 
                 // Check timeout every 8 tasks because nanoTime() is relatively expensive.
-                if ((i & 0x7) == 0 && deadLineNanos <= System.nanoTime())
+                if (i > 0 && (i & 0x7) == 0 && deadLineNanos <= System.nanoTime())
                     break;
             }
         }
@@ -464,7 +471,7 @@ public class OutboundMessagingConnection
                 channelWriter.channel.flush();
             }
             // if we get here, we know we sent a message, but we didn't explicitly flush. rescheudle a consumer task
-            // which will
+            // which will read more messages (and eventually flush).
             else // !flushed || backlogSize > 0
             {
                 eventLoop.submit(this::maybeStartDequeuing);
@@ -694,7 +701,7 @@ public class OutboundMessagingConnection
         return false;
     }
 
-    private void maybeReconnect()
+    void maybeReconnect()
     {
         expireMessages();
         if (backlogSize.get() > 0)
@@ -738,7 +745,7 @@ public class OutboundMessagingConnection
         {
             if (result.channelWriter != null)
                 result.channelWriter.close();
-            purgeBacklog();
+            purgeBacklog(); // probably purged when the instance was closed, but this won't hurt
             return;
         }
 
@@ -807,15 +814,15 @@ public class OutboundMessagingConnection
      *
      * Note: this will not be invoked on the event loop.
      */
-    void reconnectWithNewIp(InetAddressAndPort newAddr)
+    Future<?> reconnectWithNewIp(InetAddressAndPort newAddr)
     {
         // if we're closed, ignore the request
         if (closed)
-            return;
+            return null;
 
         connectionId = connectionId.withNewConnectionAddress(newAddr);
 
-        eventLoop.submit(() -> {
+        return eventLoop.submit(() -> {
             if (channelWriter != null)
                 channelWriter.softClose();
         });
@@ -915,18 +922,6 @@ public class OutboundMessagingConnection
     OutboundConnectionIdentifier getConnectionId()
     {
         return connectionId;
-    }
-
-    @VisibleForTesting
-    void setConnectionTimeoutFuture(ScheduledFuture<?> connectionTimeoutFuture)
-    {
-        this.connectionTimeoutFuture = connectionTimeoutFuture;
-    }
-
-    @VisibleForTesting
-    ScheduledFuture<?> getConnectionTimeoutFuture()
-    {
-        return connectionTimeoutFuture;
     }
 
     public boolean isConnected()
