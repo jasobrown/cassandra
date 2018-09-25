@@ -400,13 +400,12 @@ public class OutboundMessagingConnection
         boolean flushed = false;
         ChannelFuture future = null;
 
-        // these fields are for recording metrics, without invoking the AtomicInteger compare-and-swap on the hot path (in the loop below)
         int dequeuedMessages = 0;
         int sentMessages = 0;
 
         try
         {
-            for (int i = 0; i < MAX_DEQUEUE_COUNT; i++)
+            while (dequeuedMessages < MAX_DEQUEUE_COUNT)
             {
                 if (!channelWriter.channel.isWritable())
                     break;
@@ -432,8 +431,8 @@ public class OutboundMessagingConnection
                         break;
                 }
 
-                // Check timeout every 8 tasks because nanoTime() is relatively expensive.
-                if (i > 0 && (i & 0x7) == 0 && deadLineNanos <= System.nanoTime())
+                // Check timeout every 16 tasks because nanoTime() is relatively expensive.
+                if ((dequeuedMessages & 0xF) == 0 && deadLineNanos <= System.nanoTime())
                     break;
             }
         }
