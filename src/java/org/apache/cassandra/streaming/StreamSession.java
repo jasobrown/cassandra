@@ -884,7 +884,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             assert isValidTransition(currentState, nextState) : String.format("current state = %s, next state = %s", currentState, nextState);
 
             boolean b = state.compareAndSet(currentState, nextState);
-            logger.debug("JEB::SS could we CAS the session state from {} to {}: {}", currentState, nextState, b);
+            logger.debug("JEB::SS could we CAS the session state from {} to {}: {}", currentState, nextState, b, new Exception("******* JEB stack dump **********"));
 
             return b;
         }
