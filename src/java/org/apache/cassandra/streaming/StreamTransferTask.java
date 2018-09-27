@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.streaming;
 
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.ScheduledFuture;
@@ -70,7 +71,7 @@ public class StreamTransferTask extends StreamTask
      *
      * @param sequenceNumber sequence number of stream
      */
-    public void complete(int sequenceNumber)
+    public void complete(int sequenceNumber) throws IOException
     {
         boolean signalComplete;
         synchronized (this)
@@ -169,7 +170,14 @@ public class StreamTransferTask extends StreamTask
                 {
                     // remove so we don't cancel ourselves
                     timeoutTasks.remove(sequenceNumber);
-                    StreamTransferTask.this.complete(sequenceNumber);
+                    try
+                    {
+                        StreamTransferTask.this.complete(sequenceNumber);
+                    }
+                    catch (IOException e)
+                    {
+                        session.onError(e);
+                    }
                 }
             }
         }, time, unit);

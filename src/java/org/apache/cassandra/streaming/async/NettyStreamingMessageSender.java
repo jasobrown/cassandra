@@ -135,7 +135,7 @@ public class NettyStreamingMessageSender implements StreamingMessageSender
     }
 
     @Override
-    public void initialize()
+    public void initialize() throws IOException
     {
         StreamInitMessage message = new StreamInitMessage(FBUtilities.getBroadcastAddressAndPort(),
                                                           session.sessionIndex(),
@@ -205,7 +205,7 @@ public class NettyStreamingMessageSender implements StreamingMessageSender
     }
 
     @Override
-    public void sendMessage(StreamMessage message)
+    public void sendMessage(StreamMessage message) throws IOException
     {
         if (closed)
             throw new RuntimeException("stream has been closed, cannot send " + message);
@@ -220,16 +220,8 @@ public class NettyStreamingMessageSender implements StreamingMessageSender
             return;
         }
 
-        try
-        {
-            setupControlMessageChannel();
-            sendControlMessage(controlMessageChannel, message, future -> onControlMessageComplete(future, message));
-        }
-        catch (Exception e)
-        {
-            close();
-            session.onError(e);
-        }
+        setupControlMessageChannel();
+        sendControlMessage(controlMessageChannel, message, future -> onControlMessageComplete(future, message));
     }
 
     private void sendControlMessage(Channel channel, StreamMessage message, GenericFutureListener listener) throws IOException
@@ -495,7 +487,7 @@ public class NettyStreamingMessageSender implements StreamingMessageSender
     @Override
     public boolean connected()
     {
-        return !closed;
+        return !closed && controlMessageChannel != null && controlMessageChannel.isOpen();
     }
 
     @Override

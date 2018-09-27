@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.streaming;
 
+import java.io.IOException;
 import java.net.SocketTimeoutException;
 import java.util.*;
 import java.util.concurrent.*;
@@ -468,46 +469,54 @@ public class StreamSession implements IEndpointStateChangeSubscriber
 
     public void messageReceived(StreamMessage message)
     {
-        switch (message.type)
+        try
         {
-            case STREAM_INIT:
-                // nop
-                break;
-            case PREPARE_SYN:
-                PrepareSynMessage msg = (PrepareSynMessage) message;
-                prepare(msg.requests, msg.summaries);
-                break;
-            case PREPARE_SYNACK:
-                prepareSynAck((PrepareSynAckMessage) message);
-                break;
-            case PREPARE_ACK:
-                prepareAck((PrepareAckMessage) message);
-                break;
-            case STREAM:
-                receive((IncomingStreamMessage) message);
-                break;
-            case RECEIVED:
-                ReceivedMessage received = (ReceivedMessage) message;
-                received(received.tableId, received.sequenceNumber);
-                break;
-            case COMPLETE:
-                complete();
-                break;
-            case KEEP_ALIVE:
-                // NOP - we only send/receive the KEEP_ALIVE to force the TCP connection to remain open
-                break;
-            case SESSION_FAILED:
-                sessionFailed();
-                break;
-            default:
-                throw new AssertionError("unhandled StreamMessage type: " + message.getClass().getName());
+            switch (message.type)
+            {
+                case STREAM_INIT:
+                    // nop
+                    break;
+                case PREPARE_SYN:
+                    PrepareSynMessage msg = (PrepareSynMessage) message;
+                    prepare(msg.requests, msg.summaries);
+                    break;
+                case PREPARE_SYNACK:
+                    prepareSynAck((PrepareSynAckMessage) message);
+                    break;
+                case PREPARE_ACK:
+                    prepareAck((PrepareAckMessage) message);
+                    break;
+                case STREAM:
+                    receive((IncomingStreamMessage) message);
+                    break;
+                case RECEIVED:
+                    ReceivedMessage received = (ReceivedMessage) message;
+                    received(received.tableId, received.sequenceNumber);
+                    break;
+                case COMPLETE:
+                    complete();
+                    break;
+                case KEEP_ALIVE:
+                    // NOP - we only send/receive the KEEP_ALIVE to force the TCP connection to remain open
+                    break;
+                case SESSION_FAILED:
+                    sessionFailed();
+                    break;
+                default:
+                    throw new AssertionError("unhandled StreamMessage type: " + message.getClass().getName());
+            }
+        }
+        catch (Exception e)
+        {
+            JVMStabilityInspector.inspectThrowable(e);
+            onError(e);
         }
     }
 
     /**
      * Call back when connection initialization is complete to start the prepare phase.
      */
-    public void onInitializationComplete()
+    public void onInitializationComplete() throws IOException
     {
         // send prepare message
         state.set(State.PREPARING);
@@ -524,9 +533,17 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     public Future onError(Throwable e)
     {
         logError(e);
-        // send session failure message
         if (messageSender.connected())
-            messageSender.sendMessage(new SessionFailedMessage());
+        {
+            try
+            {
+                messageSender.sendMessage(new SessionFailedMessage());
+            }
+            catch (IOException ioe)
+            {
+                // nop - we'll have other errors in the log, and any action here would just add noise.
+            }
+        }
         // fail session
         return closeSession(State.FAILED);
     }
@@ -554,20 +571,10 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     /**
      * Prepare this session for sending/receiving files.
      */
-    public void prepare(Collection<StreamRequest> requests, Collection<StreamSummary> summaries)
+    public void prepare(Collection<StreamRequest> requests, Collection<StreamSummary> summaries) throws IOException
     {
         // prepare tasks
         state.set(State.PREPARING);
-        ScheduledExecutors.nonPeriodicTasks.execute(() -> prepareAsync(requests, summaries));
-    }
-
-    /**
-     * Finish preparing the session. This method is blocking (memtables are flushed in {@link #addTransferRanges}),
-     * so the logic should not execute on the main IO thread (read: netty event loop).
-     */
-    private void prepareAsync(Collection<StreamRequest> requests, Collection<StreamSummary> summaries)
-    {
-
         for (StreamRequest request : requests)
             addTransferRanges(request.keyspace, RangesAtEndpoint.concat(request.full, request.transientReplicas), request.columnFamilies, true); // always flush on stream request
         for (StreamSummary summary : summaries)
@@ -584,7 +591,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         maybeCompleted();
     }
 
-    private void prepareSynAck(PrepareSynAckMessage msg)
+    private void prepareSynAck(PrepareSynAckMessage msg) throws IOException
     {
         if (!msg.summaries.isEmpty())
         {
@@ -601,7 +608,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             startStreamingFiles(true);
     }
 
-    private void prepareAck(PrepareAckMessage msg)
+    private void prepareAck(PrepareAckMessage msg) throws IOException
     {
         if (isPreview())
             completePreview();
@@ -632,7 +639,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
      *
      * @param message received stream
      */
-    public void receive(IncomingStreamMessage message)
+    public void receive(IncomingStreamMessage message) throws IOException
     {
         if (isPreview())
         {
@@ -654,7 +661,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         streamResult.handleProgress(progress);
     }
 
-    public void received(TableId tableId, int sequenceNumber)
+    public void received(TableId tableId, int sequenceNumber) throws IOException
     {
         transfers.get(tableId).complete(sequenceNumber);
     }
@@ -662,7 +669,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     /**
      * Check if session is completed on receiving {@code StreamMessage.Type.COMPLETE} message.
      */
-    public synchronized void complete()
+    public synchronized void complete() throws IOException
     {
         logger.debug("handling Complete message, state = {}, completeSent = {}", state, completeSent);
         if (state.get() == State.WAIT_COMPLETE)
@@ -703,13 +710,13 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         return new SessionInfo(peer, index, preferredPeerInetAddressAndPort, receivingSummaries, transferSummaries, state.get());
     }
 
-    public synchronized void taskCompleted(StreamReceiveTask completedTask)
+    public synchronized void taskCompleted(StreamReceiveTask completedTask) throws IOException
     {
         receivers.remove(completedTask.tableId);
         maybeCompleted();
     }
 
-    public synchronized void taskCompleted(StreamTransferTask completedTask)
+    public synchronized void taskCompleted(StreamTransferTask completedTask) throws IOException
     {
         transfers.remove(completedTask.tableId);
         maybeCompleted();
@@ -749,7 +756,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
         }
     }
 
-    private boolean maybeCompleted()
+    private boolean maybeCompleted() throws IOException
     {
         boolean completed = receivers.isEmpty() && transfers.isEmpty();
         if (completed)
@@ -794,7 +801,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             receivers.put(summary.tableId, new StreamReceiveTask(this, summary.tableId, summary.files, summary.totalSize));
     }
 
-    private void startStreamingFiles(boolean notifyPrepared)
+    private void startStreamingFiles(boolean notifyPrepared) throws IOException
     {
         if (notifyPrepared)
             streamResult.handleSessionPrepared(this);
@@ -873,25 +880,27 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             if (currentState == nextState)
                 return false;
 
-            assert isValidTransition(currentState, nextState);
+            assert isValidTransition(currentState, nextState) : String.format("current state = %s, next state = %s", currentState, nextState);
             return state.compareAndSet(currentState, nextState);
         }
 
         static boolean isValidTransition(State current, State next)
         {
+            if (current == next)
+                return false;
+
             switch (current)
             {
                 case FAILED:
                 case COMPLETE:
                     return false;
                 case INITIALIZED:
-                    return next == State.PREPARING || next == State.FAILED;
+                    return next != State.STREAMING;
                 case PREPARING:
-                    return next == State.STREAMING || next == State.FAILED;
+                    return next != State.INITIALIZED;
                 case STREAMING:
-                    return next == State.WAIT_COMPLETE || next == State.COMPLETE || next == State.FAILED;
                 case WAIT_COMPLETE:
-                    return next == State.COMPLETE || next == State.FAILED;
+                    return next != State.INITIALIZED && next != State.PREPARING;
                 default:
                     throw new IllegalArgumentException("unknown state: " + next);
             }
