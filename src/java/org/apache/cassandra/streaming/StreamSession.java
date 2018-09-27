@@ -882,7 +882,11 @@ public class StreamSession implements IEndpointStateChangeSubscriber
                 return false;
 
             assert isValidTransition(currentState, nextState) : String.format("current state = %s, next state = %s", currentState, nextState);
-            return state.compareAndSet(currentState, nextState);
+
+            boolean b = state.compareAndSet(currentState, nextState);
+            logger.debug("JEB::SS could we CAS the session state from {} to {}: {}", currentState, nextState, b);
+
+            return b;
         }
 
         static boolean isValidTransition(State current, State next)
@@ -898,7 +902,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
                 case INITIALIZED:
                     return next != State.STREAMING;
                 case PREPARING:
-                    return next != State.INITIALIZED;
+                    return next != State.INITIALIZED && next != State.COMPLETE;
                 case STREAMING:
                 case WAIT_COMPLETE:
                     return next != State.INITIALIZED && next != State.PREPARING;

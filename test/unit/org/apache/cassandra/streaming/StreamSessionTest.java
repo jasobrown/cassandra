@@ -86,7 +86,7 @@ public class StreamSessionTest
         Assert.assertFalse(StreamSessionState.isValidTransition(State.PREPARING, State.PREPARING));
         Assert.assertTrue(StreamSessionState.isValidTransition(State.PREPARING, State.STREAMING));
         Assert.assertTrue(StreamSessionState.isValidTransition(State.PREPARING, State.WAIT_COMPLETE));
-        Assert.assertTrue(StreamSessionState.isValidTransition(State.PREPARING, State.COMPLETE));
+        Assert.assertFalse(StreamSessionState.isValidTransition(State.PREPARING, State.COMPLETE));
         Assert.assertTrue(StreamSessionState.isValidTransition(State.PREPARING, State.FAILED));
     }
 
