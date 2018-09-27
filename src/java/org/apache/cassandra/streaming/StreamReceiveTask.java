@@ -104,7 +104,7 @@ public class StreamReceiveTask extends StreamTask
     public synchronized StreamReceiver getReceiver()
     {
         if (done)
-            throw new RuntimeException(String.format("Stream receive task %s of cf %s already finished.", session.planId(), tableId));
+            throw new StreamReceiveException(session, String.format("Stream receive task %s of cf %s already finished.", session.planId(), tableId));
         return receiver;
     }
 

@@ -408,7 +408,8 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             if (finalState == State.FAILED)
                 abortedTasksFuture = ScheduledExecutors.nonPeriodicTasks.submit(this::abortTasks);
 
-            incomingChannels.values().stream().map(channel -> channel.close());
+            for (Channel c : incomingChannels.values())
+                c.close();
             messageSender.close();
 
             streamResult.handleSessionComplete(this);

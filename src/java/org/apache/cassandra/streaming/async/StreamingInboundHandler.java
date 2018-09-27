@@ -197,16 +197,17 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
             {
                 // ignore
             }
+            catch (StreamReceiveException sre)
+            {
+                if (!sre.session.isFinished())
+                    sre.session.onError(sre);
+            }
             catch (Throwable t)
             {
                 JVMStabilityInspector.inspectThrowable(t);
                 if (session != null)
                 {
                     session.onError(t);
-                }
-                else if (t instanceof StreamReceiveException)
-                {
-                    ((StreamReceiveException)t).session.onError(t);
                 }
                 else
                 {

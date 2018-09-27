@@ -195,10 +195,10 @@ public class NettyStreamingMessageSender implements StreamingMessageSender
         sb.append("[Stream");
 
         if (session != null)
-                sb.append(" #").append(session.planId());
+            sb.append(" #").append(session.planId());
 
         if (channel != null)
-                sb.append(" channel: ").append(channel.id());
+            sb.append(" channel: ").append(channel.id());
 
         sb.append(']');
         return sb.toString();
