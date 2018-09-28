@@ -853,16 +853,11 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             FAILED
         }
 
-        private AtomicReference<State> state;
+        private final AtomicReference<State> state;
 
         StreamSessionState()
         {
             state = new AtomicReference<>(State.INITIALIZED);
-        }
-
-        public StreamSessionState(String s)
-        {
-            state = new AtomicReference<>(State.valueOf(s));
         }
 
         State get()
