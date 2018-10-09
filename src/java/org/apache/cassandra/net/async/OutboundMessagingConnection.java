@@ -212,7 +212,10 @@ public class OutboundMessagingConnection
      */
     private Channel channel;
 
-    private Dequeuer dequeuer;
+    /**
+     * Responsible for pulling messages off the {@link #backlog}. Should only be referenced on the {@link #eventLoop}.
+     */
+    private MessageDequeuer messageDequeuer;
 
     /**
      * the target protocol version to communicate to the peer with, discovered/negotiated via handshaking
@@ -220,13 +223,6 @@ public class OutboundMessagingConnection
     private int targetVersion;
 
     private volatile boolean closed;
-
-    /**
-     * A reusable array to capture messages to send after they are dequeued in {@link Dequeuer#dequeueMessages()}.
-     * Only used in that method, on the consumer thread.
-     */
-    private final QueuedMessage[] messagesToSend = new QueuedMessage[MAX_DEQUEUE_COUNT];
-
 
     OutboundMessagingConnection(OutboundConnectionIdentifier connectionId,
                                 ServerEncryptionOptions encryptionOptions,
@@ -382,7 +378,7 @@ public class OutboundMessagingConnection
     }
 
     /**
-     * Peform checks on the state of this instance, before invoking {@link Dequeuer#dequeueMessages()}.
+     * Peform checks on the state of this instance, before invoking {@link MessageDequeuer#dequeueMessages()}.
      *
      * Note: executes on the netty event loop.
      */
@@ -397,41 +393,42 @@ public class OutboundMessagingConnection
             return false;
         }
 
-        return dequeuer.dequeueMessages();
+        return messageDequeuer.dequeueMessages();
     }
 
-    interface Dequeuer
+    interface MessageDequeuer
     {
         /**
-         * Note: this method will be invoked on the netty event loop
+         * Pull messages off the {@link #backlog} and write them to the netty channel until we can flush (or hit an upper bound).
+         * Assumes the channel is properly established.
+         *
+         * Note: executes on the netty event loop.
          */
         boolean dequeueMessages();
+
         void close();
     }
 
-    /**
-     * Pull messages off the {@link #backlog} and write them to the netty channel until we can flush (or hit an upper bound).
-     * Assumes the channel is properly established.
-     *
-     * This method *always* needs to exit with some resumable state for the consumer task:
-     *  - backlog is empty (so producers can reschedule)
-     *  - we've sent messages, and there's more in the backlog: handleMessageResult will be invoked when the future (promise)
-     *      is fulfilled, which will call dequeueMessages again
-     *  - the consumer task is rescheduled because we didn't send any messages (they were dequeued and all expired,
-     *      or channel was not writable) but there are more in the queue
-     *
-     * Note: executes on the netty event loop.
-     */
-    class SimpleDequeuer implements Dequeuer
+    class SimpleMessageDequeuer implements MessageDequeuer
     {
-        private long dequeueMessagesExecution = 0;
+        /**
+         * A reusable array to capture messages to send after they are dequeued.
+         * Only used on the consumer thread.
+         */
+        private final QueuedMessage[] messagesToSend = new QueuedMessage[MAX_DEQUEUE_COUNT];
 
+        /**
+         * {@inheritDoc}
+         *
+         * This method *always* needs to exit with some resumable state for the consumer task:
+         *  - backlog is empty (so producers can reschedule)
+         *  - we've sent messages, and there's more in the backlog: handleMessageResult will be invoked when the future (promise)
+         *      is fulfilled, which will call dequeueMessages again
+         *  - the consumer task is rescheduled because we didn't send any messages (they were dequeued and all expired,
+         *      or channel was not writable) but there are more in the queue
+         */
         public boolean dequeueMessages()
         {
-            dequeueMessagesExecution++;
-            long exec = dequeueMessagesExecution;
-//            logger.info("JEB::OMC::dequeueMessages-{} starting execution count = {}", connectionId.type(), exec);
-
             final long timestampNanos = System.nanoTime();
             int sendMessageCount = 0;
             int dequeuedMessages = 0;
@@ -477,14 +474,6 @@ public class OutboundMessagingConnection
                 updateCountersAfterDequeue(dequeuedMessages, sendMessageCount);
             }
 
-            long duration = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - timestampNanos);
-//            logger.info("JEB::OMC::dequeueMessages-{} stats: execution count = {}, duration = {}μs, " +
-//                        "dequeued messaged = {} sentMessages = {}, droppedMessages = {}, bytes sent = {}, " +
-//                        "backlogSize = {}, backlog.isEmpty = {}",
-//                        connectionId.type(), exec, duration,
-//                        dequeuedMessages, sendMessageCount, (dequeuedMessages - sendMessageCount), byteCountToSend,
-//                        backlogSize.get(), backlog.isEmpty());
-
             if (!backlog.isEmpty())
                 eventLoop.submit(OutboundMessagingConnection.this::maybeStartDequeuing);
 
@@ -527,8 +516,11 @@ public class OutboundMessagingConnection
         private void updateCountersAfterDequeue(int dequeuedMessages, int sendMessageCount)
         {
             // only update the Atomic fields if we actually did anything
-            if (dequeuedMessages > 0)
-                backlogSize.addAndGet(-dequeuedMessages);
+            if (dequeuedMessages == 0)
+                return;
+
+            backlogSize.addAndGet(-dequeuedMessages);
+
             if (sendMessageCount > 0)
                 completedMessageCount.addAndGet(sendMessageCount);
             int droppedMessages = dequeuedMessages - sendMessageCount;
@@ -540,7 +532,7 @@ public class OutboundMessagingConnection
         {  /* nop */  }
     }
 
-    class LargeMessageDequeuer implements Dequeuer
+    class LargeMessageMessageDequeuer implements MessageDequeuer
     {
         private static final int DEFAULT_BUFFER_SIZE = 16 * 1024;
         private final ThreadPoolExecutor svc;
@@ -550,7 +542,7 @@ public class OutboundMessagingConnection
          */
         private final Channel channel;
 
-        LargeMessageDequeuer(Channel channel)
+        LargeMessageMessageDequeuer(Channel channel)
         {
             this.channel = channel;
             String threadName = "MessagingService-NettyOutbound-" + connectionId.remote().toString() + "-LargeMessages";
@@ -680,15 +672,10 @@ public class OutboundMessagingConnection
         Throwable cause = future.cause();
         if (cause == null)
         {
-//            logger.info("JEB::OMC::handleMessageResult-{} success, exec count = {}, backlog.isEmpty = {}",
-//                        connectionId.type(), dequeueMessagesExecution, backlog.isEmpty());
-
             // explicitly check if the backlog queue is empty as we haven't necessarily decremented the backlogSize
             // by the time this handler is invoked.
             if (!backlog.isEmpty())
             {
-//                logger.info("JEB::OMC::handleMessageResult-{} gonna schedule maybeDequeueMessages, exec count = {}",
-//                            connectionId.type(), dequeueMessagesExecution);
                 // not calling dequeueMessages explicitly here (and instead scheduling the task) as we can get here directly in-line
                 // from dequeueMessages if the buffers were able to be flushed immediately to the socket. the problem we
                 // would run into is that if the backlog is constantly > 0, we would creating a huge stack size due to the recursively
@@ -808,25 +795,24 @@ public class OutboundMessagingConnection
 
     private Bootstrap buildBootstrap(boolean compress)
     {
-        boolean tcpNoDelay = isLocalDC(connectionId.local(), connectionId.remote()) ? INTRADC_TCP_NODELAY : DatabaseDescriptor.getInterDCTcpNoDelay();
-        int sendBufferSize = DatabaseDescriptor.getInternodeSendBufferSize() > 0
-                             ? DatabaseDescriptor.getInternodeSendBufferSize()
-                             : 0;
-
-        OutboundConnectionParams params = OutboundConnectionParams.builder()
+        boolean tcpNoDelay = isLocalDC(connectionId.local(), connectionId.remote())
+                             ? INTRADC_TCP_NODELAY
+                             : DatabaseDescriptor.getInterDCTcpNoDelay();
+        OutboundConnectionParams.Builder builder = OutboundConnectionParams.builder()
                                                                   .connectionId(connectionId)
                                                                   .callback(this::finishHandshake)
                                                                   .encryptionOptions(encryptionOptions)
                                                                   .mode(Mode.MESSAGING)
                                                                   .compress(compress)
                                                                   .coalescingStrategy(coalescingStrategy)
-                                                                  .sendBufferSize(sendBufferSize)
                                                                   .tcpNoDelay(tcpNoDelay)
                                                                   .protocolVersion(targetVersion)
-                                                                  .eventLoop(eventLoop)
-                                                                  .build();
+                                                                  .eventLoop(eventLoop);
 
-        return NettyFactory.instance.createOutboundBootstrap(params);
+          if (DatabaseDescriptor.getInternodeSendBufferSize() > 0)
+              builder.sendBufferSize(DatabaseDescriptor.getInternodeSendBufferSize());
+
+        return NettyFactory.instance.createOutboundBootstrap(builder.build());
     }
 
     static boolean isLocalDC(InetAddressAndPort localHost, InetAddressAndPort remoteHost)
@@ -947,17 +933,14 @@ public class OutboundMessagingConnection
                                  coalescingStrategy != null ? coalescingStrategy : CoalescingStrategies.Strategy.DISABLED);
                 }
 
-                if (dequeuer != null)
-                    dequeuer.close();
+                if (messageDequeuer != null)
+                    messageDequeuer.close();
                 if (channel != null)
                     channel.close();
                 channel = result.channel;
                 channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).set(false);
-                dequeuer = connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE
-                           ? new LargeMessageDequeuer(channel)
-                           : new SimpleDequeuer();
-
-                dequeuer.dequeueMessages();
+                messageDequeuer = deriveMessageDequeuer(connectionId, channel);
+                messageDequeuer.dequeueMessages();
                 break;
             case DISCONNECT:
                 maybeReconnect();
@@ -968,6 +951,13 @@ public class OutboundMessagingConnection
             default:
                 throw new AssertionError("unhandled result type: " + result.outcome);
         }
+    }
+
+    private MessageDequeuer deriveMessageDequeuer(OutboundConnectionIdentifier connectionId, Channel channel)
+    {
+        return connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE
+               ? new LargeMessageMessageDequeuer(channel)
+               : new SimpleMessageDequeuer();
     }
 
     /**
@@ -1046,7 +1036,6 @@ public class OutboundMessagingConnection
      */
     public void close(boolean softClose)
     {
-//        logger.info("{} JEB::OMC::close", loggingTag(), new Exception("********* JEB stack dump ********"));
         if (closed)
             return;
 
@@ -1069,7 +1058,7 @@ public class OutboundMessagingConnection
                     channel.close();
                 }
 
-                dequeuer.close();
+                messageDequeuer.close();
             }
         }).awaitUninterruptibly(5, TimeUnit.SECONDS);
     }
