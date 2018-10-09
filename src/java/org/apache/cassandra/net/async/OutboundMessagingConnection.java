@@ -360,10 +360,10 @@ public class OutboundMessagingConnection
             backlogSize.addAndGet(-expiredMessageCount);
             droppedMessageCount.addAndGet(expiredMessageCount);
 
-//            if (logger.isTraceEnabled())
+            if (logger.isTraceEnabled())
             {
                 long duration = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - timestampNanos);
-                logger.info("JEB::OMC {} Expiration took {}μs, and expired {} messages, backlog size = {}", loggingTag(), duration, expiredMessageCount, backlogSize.get());
+                logger.trace("{} Expiration took {}μs, and expired {} messages", loggingTag(), duration, expiredMessageCount);
             }
         }
         catch (Throwable t)
@@ -430,7 +430,7 @@ public class OutboundMessagingConnection
         {
             dequeueMessagesExecution++;
             long exec = dequeueMessagesExecution;
-            logger.info("JEB::OMC::dequeueMessages-{} starting execution count = {}", connectionId.type(), exec);
+//            logger.info("JEB::OMC::dequeueMessages-{} starting execution count = {}", connectionId.type(), exec);
 
             final long timestampNanos = System.nanoTime();
             int sendMessageCount = 0;
@@ -478,12 +478,12 @@ public class OutboundMessagingConnection
             }
 
             long duration = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - timestampNanos);
-            logger.info("JEB::OMC::dequeueMessages-{} stats: execution count = {}, duration = {}μs, " +
-                        "dequeued messaged = {} sentMessages = {}, droppedMessages = {}, bytes sent = {}, " +
-                        "backlogSize = {}, backlog.isEmpty = {}",
-                        connectionId.type(), exec, duration,
-                        dequeuedMessages, sendMessageCount, (dequeuedMessages - sendMessageCount), byteCountToSend,
-                        backlogSize.get(), backlog.isEmpty());
+//            logger.info("JEB::OMC::dequeueMessages-{} stats: execution count = {}, duration = {}μs, " +
+//                        "dequeued messaged = {} sentMessages = {}, droppedMessages = {}, bytes sent = {}, " +
+//                        "backlogSize = {}, backlog.isEmpty = {}",
+//                        connectionId.type(), exec, duration,
+//                        dequeuedMessages, sendMessageCount, (dequeuedMessages - sendMessageCount), byteCountToSend,
+//                        backlogSize.get(), backlog.isEmpty());
 
             if (!backlog.isEmpty())
                 eventLoop.submit(OutboundMessagingConnection.this::maybeStartDequeuing);
@@ -1046,7 +1046,7 @@ public class OutboundMessagingConnection
      */
     public void close(boolean softClose)
     {
-        logger.info("{} JEB::OMC::close", loggingTag(), new Exception("********* JEB stack dump ********"));
+//        logger.info("{} JEB::OMC::close", loggingTag(), new Exception("********* JEB stack dump ********"));
         if (closed)
             return;
 
