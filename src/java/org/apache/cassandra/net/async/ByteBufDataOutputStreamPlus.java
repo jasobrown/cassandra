@@ -20,6 +20,7 @@ package org.apache.cassandra.net.async;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
 import java.util.concurrent.Semaphore;
@@ -99,6 +100,7 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
             @Override
             public int write(ByteBuffer src) throws IOException
             {
+                logger.debug("JEB::BBDOSP::newDefaultChannel().write src = {}", src);
                 assert src == buffer;
                 int size = src.position();
                 doFlush(size);
@@ -113,14 +115,16 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
 
             @Override
             public void close()
-            {   }
+            {
+            }
         };
     }
 
     public static ByteBufDataOutputStreamPlus create(Channel channel, int bufferSize, Consumer<Throwable> errorHandler,
                                                      int rateLimiterBlockTime, TimeUnit timeUnit)
     {
-        return create(channel, bufferSize, errorHandler, rateLimiterBlockTime, timeUnit, future -> {});
+        return create(channel, bufferSize, errorHandler, rateLimiterBlockTime, timeUnit, future -> {
+        });
     }
 
     public static ByteBufDataOutputStreamPlus create(Channel channel, int bufferSize, Consumer<Throwable> errorHandler,
@@ -214,9 +218,18 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
     @Override
     protected void doFlush(int count) throws IOException
     {
-        // flush the current backing write buffer only if there's any pending data
-        if (buffer.position() > 0 && channel.isOpen())
+        if (!channel.isOpen())
         {
+            releaseBuffer();
+            throw new ClosedChannelException();
+        }
+
+        // flush the current backing write buffer only if there's any pending data
+        if (buffer.position() > 0)
+        {
+//            logger.debug("JEB::BBDOSP::doFlush arg count = {}, buffer = {}, channel.isOpen() = {}, channel.isWritable() = {}, channel pending bytes = {}",
+//                         count, buffer, channel.isOpen(), channel.isWritable(), channel.unsafe().outboundBuffer().totalPendingWriteBytes());
+
             int byteCount = buffer.position();
             currentBuf.writerIndex(byteCount);
 
@@ -233,15 +246,15 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
 
     /**
      * Handles the result of publishing a buffer to the channel.
-     *
+     * <p>
      * Note: this will be executed on the event loop.
      */
     private void handleBuffer(Future<? super Void> future, int bytesWritten)
     {
         channelRateLimiter.release(bytesWritten);
 
-        if (logger.isTraceEnabled())
-            logger.trace("bytesWritten {} {} because {}", bytesWritten, future.isSuccess() ? "Succeeded" : "Failed", future.cause());
+//        if (logger.isTraceEnabled())
+//            logger.debug("JEB::BBDOSP::handleBuffer bytesWritten {} {} because {}", bytesWritten, future.isSuccess() ? "Succeeded" : "Failed", future.cause());
 
         if (!future.isSuccess() && channel.isOpen())
             errorHandler.accept(future.cause());
@@ -252,19 +265,8 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
         return channel.alloc();
     }
 
-    /**
-     * {@inheritDoc}
-     *
-     * Flush any last buffered (if the channel is open), and release any buffers. *Not* responsible for closing
-     * the netty channel as we might use it again for transferring more files.
-     *
-     * Note: should be called on the producer thread, not the netty event loop.
-     */
-    @Override
-    public void close() throws IOException
+    private void releaseBuffer()
     {
-        doFlush(0);
-
         if (currentBuf != null)
         {
             if (currentBuf.refCnt() > 0)
@@ -272,5 +274,28 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
             currentBuf = null;
             buffer = null;
         }
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Flush any last buffered (if the channel is open), and release any buffers. *Not* responsible for closing
+     * the netty channel as we might use it again for transferring more files.
+     * <p>
+     * Note: should be called on the producer thread, not the netty event loop.
+     */
+    @Override
+    public void close() throws IOException
+    {
+        try
+        {
+            doFlush(0);
+        }
+        catch (ClosedChannelException cce)
+        {
+            // ignore a closed channel
+        }
+
+        releaseBuffer();
     }
 }

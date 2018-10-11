@@ -19,6 +19,7 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
@@ -51,6 +52,7 @@ import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
+import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
@@ -300,6 +302,9 @@ public class OutboundMessagingConnection
 
         backlog.offer(queuedMessage);
 
+        if (connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE)
+            logger.debug("{} JEB::OMC enqueuing large message = {}, size = {}", loggingTag(), queuedMessage, queuedMessage.message.serializedSize(targetVersion));
+
         // only schedule from a producer thread if the backlog was zero before this thread incremented it
         if (backlogSize.getAndIncrement() == 0)
             eventLoop.submit(this::maybeStartDequeuing);
@@ -534,7 +539,7 @@ public class OutboundMessagingConnection
 
     class LargeMessageMessageDequeuer implements MessageDequeuer
     {
-        private static final int DEFAULT_BUFFER_SIZE = 16 * 1024;
+        private static final int DEFAULT_BUFFER_SIZE = 64 * 1024;
         private final ThreadPoolExecutor svc;
 
         /**
@@ -559,8 +564,8 @@ public class OutboundMessagingConnection
         public boolean dequeueMessages()
         {
             final long timestampNanos = System.nanoTime();
-            QueuedMessage next = backlog.poll();
-            if (next != null)
+            QueuedMessage next;
+            while ((next = backlog.poll()) != null)
             {
                 backlogSize.decrementAndGet();
                 if (!next.isTimedOut(timestampNanos))
@@ -595,16 +600,24 @@ public class OutboundMessagingConnection
             {
                 this.currentMessage = currentMessage;
                 this.promise = aggregatePromise;
-                promises = new LinkedList<>();
+
+                int expectedPromises = (currentMessage.message.serializedSize(targetVersion) / DEFAULT_BUFFER_SIZE) + 1;
+                promises = new ArrayList<>(expectedPromises);
             }
 
+            @SuppressWarnings("resource")
             public void run()
             {
-                try (ByteBufDataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE,
-                                                                                             this::handleError, 30, TimeUnit.SECONDS, this::handleFuture))
+                int minBufferSize = Math.min(currentMessage.message.serializedSize(targetVersion), DEFAULT_BUFFER_SIZE);
+
+                try
                 {
+                    DataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, minBufferSize, this::handleError,
+                                                                                     30, TimeUnit.SECONDS, this::handleFuture);
+                    logger.debug("{} JEB::OMC sending large message = {}, size = {}", loggingTag(), currentMessage, currentMessage.message.serializedSize(targetVersion));
                     currentMessage.message.serialize(output, targetVersion, connectionId, currentMessage.id, currentMessage.timestampNanos);
                     output.flush();
+                    logger.debug("{} JEB::OMC sent large message = {}, size = {}", loggingTag(), currentMessage, currentMessage.message.serializedSize(targetVersion));
 
                     // need to wait until *all* promises are created & return successfully before we can declare success on this message.
                     for (Future<?> future : promises)
@@ -628,6 +641,7 @@ public class OutboundMessagingConnection
                 }
                 finally
                 {
+                    logger.debug("{} JEB::OMC finished sending a large message:: id = {}", loggingTag(), currentMessage.id);
                     eventLoop.submit(() -> handleMessageResult(promise));
                 }
             }
@@ -733,7 +747,8 @@ public class OutboundMessagingConnection
         if (closed)
             return false;
 
-        logger.debug("{} connection attempt {}", loggingTag(), connectAttemptCount);
+        if (logger.isTraceEnabled())
+            logger.trace("{} connection attempt {}", loggingTag(), connectAttemptCount);
 
         InetAddressAndPort remote = connectionId.remote();
         if (!authenticator.authenticate(remote.address, remote.port))
