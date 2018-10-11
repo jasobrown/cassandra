@@ -19,6 +19,7 @@
 package org.apache.cassandra.net.async;
 
 import java.io.EOFException;
+import java.io.IOError;
 import java.io.IOException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
@@ -75,11 +76,11 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
 
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
     {
-        if (cause instanceof EOFException)
+        if (cause instanceof EOFException || (cause.getCause() != null && cause.getCause() instanceof EOFException))
             logger.trace("eof reading from socket; closing", cause);
         else if (cause instanceof UnknownTableException)
             logger.warn("Got message from unknown table while reading from socket; closing", cause);
-        else if (cause instanceof IOException)
+        else if (cause instanceof IOException || cause instanceof IOError)
             logger.trace("IOException reading from socket; closing", cause);
         else
             logger.warn("Unexpected exception caught in inbound channel pipeline from " + ctx.channel().remoteAddress(), cause);
@@ -186,13 +187,13 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
          * The default low-water mark to set on {@link #queuedBuffers}.
          * See {@link RebufferingByteBufDataInputPlus} for more information.
          */
-        private static final int QUEUE_LOW_WATER_MARK = 1 << 14;
+        private static final int QUEUE_LOW_WATER_MARK = Integer.MAX_VALUE - 1;
 
         /**
          * The default high-water mark to set on {@link #queuedBuffers}.
          * See {@link RebufferingByteBufDataInputPlus} for more information.
          */
-        private static final int QUEUE_HIGH_WATER_MARK = 1 << 16;
+        private static final int QUEUE_HIGH_WATER_MARK = Integer.MAX_VALUE;
 
         /**
          * Default time in milliseconds that {@link #queuedBuffers} should wait for new buffers to arrive.

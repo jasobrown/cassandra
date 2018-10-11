@@ -28,6 +28,9 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.primitives.Ints;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import io.netty.buffer.ByteBuf;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -40,6 +43,7 @@ import org.apache.cassandra.io.util.TrackedDataInputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessagingService.Verb;
 import org.apache.cassandra.net.async.ByteBufDataInputPlus;
+import org.apache.cassandra.net.async.MessageInHandler;
 import org.apache.cassandra.net.async.RebufferingByteBufDataInputPlus;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.vint.VIntCoding;
@@ -52,6 +56,7 @@ import org.apache.cassandra.utils.vint.VIntCoding;
  */
 public class MessageIn<T>
 {
+    public static final Logger logger = LoggerFactory.getLogger(MessageIn.class);
     public final InetAddressAndPort from;
     public final T payload;
     public final Map<ParameterType, Object> parameters;
@@ -521,6 +526,7 @@ public class MessageIn<T>
         {
             while (in.isOpen() && !in.isEmpty())
             {
+                logger.debug("JEB::MI::process LOOP HEAD");
                 readPrefix(in);
                 messageHeader.from = peer;
                 messageHeader.verb = MessagingService.Verb.fromId(in.readInt());
@@ -530,11 +536,16 @@ public class MessageIn<T>
                     readParameterData(in, messageHeader);
 
                 messageHeader.payloadSize = Ints.checkedCast(VIntCoding.readUnsignedVInt(in));
+                logger.debug("JEB::MI::process - next message: id = {}, verb = {}, payload size = {}",
+                             messageHeader.messageId, messageHeader.verb, messageHeader.payloadSize);
                 MessageIn<Object> messageIn = MessageIn.read(in, messagingVersion,
                                                              messageHeader.messageId, messageHeader.constructionTime, messageHeader.from,
                                                              messageHeader.payloadSize, messageHeader.verb, messageHeader.parameters);
                 if (messageIn != null)
+                {
+                    logger.debug("JEB::MI::process - consuming next message: id = {}", messageHeader.messageId);
                     messageConsumer.accept(messageIn, messageHeader.messageId);
+                }
             }
         }
     }
