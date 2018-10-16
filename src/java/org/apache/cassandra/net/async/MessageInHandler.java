@@ -187,13 +187,13 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
          * The default low-water mark to set on {@link #queuedBuffers}.
          * See {@link RebufferingByteBufDataInputPlus} for more information.
          */
-        private static final int QUEUE_LOW_WATER_MARK = Integer.MAX_VALUE - 1;
+        private static final int QUEUE_LOW_WATER_MARK = 1 << 15;
 
         /**
          * The default high-water mark to set on {@link #queuedBuffers}.
          * See {@link RebufferingByteBufDataInputPlus} for more information.
          */
-        private static final int QUEUE_HIGH_WATER_MARK = Integer.MAX_VALUE;
+        private static final int QUEUE_HIGH_WATER_MARK = 1 << 17;
 
         /**
          * Default time in milliseconds that {@link #queuedBuffers} should wait for new buffers to arrive.

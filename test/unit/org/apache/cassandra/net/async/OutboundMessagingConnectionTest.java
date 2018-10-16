@@ -22,8 +22,11 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import com.google.common.net.InetAddresses;
 import org.junit.After;
@@ -37,7 +40,6 @@ import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.util.concurrent.Future;
 import org.apache.cassandra.auth.AllowAllInternodeAuthenticator;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
 import org.apache.cassandra.config.Config;
@@ -484,12 +486,12 @@ public class OutboundMessagingConnectionTest
     }
 
     @Test
-    public void reconnectWithNewIp()
+    public void reconnectWithNewIp() throws InterruptedException, ExecutionException, TimeoutException
     {
         OutboundConnectionIdentifier originalId = omc.getConnectionId();
         Future<?> future = omc.reconnectWithNewIp(RECONNECT_ADDR);
         Assert.assertNotNull(future);
-        future.awaitUninterruptibly(2, TimeUnit.SECONDS);
+        future.get(2, TimeUnit.SECONDS);
         Assert.assertNotEquals(omc.getConnectionId(), originalId);
     }
 

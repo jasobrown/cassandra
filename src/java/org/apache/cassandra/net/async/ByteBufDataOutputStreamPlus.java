@@ -27,6 +27,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
+import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.Uninterruptibles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,6 +37,9 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelProgressiveFuture;
+import io.netty.channel.ChannelProgressiveFutureListener;
+import io.netty.channel.ChannelProgressivePromise;
 import io.netty.util.concurrent.Future;
 import org.apache.cassandra.io.util.BufferedDataOutputStreamPlus;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
@@ -100,7 +104,6 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
             @Override
             public int write(ByteBuffer src) throws IOException
             {
-                logger.debug("JEB::BBDOSP::newDefaultChannel().write src = {}", src);
                 assert src == buffer;
                 int size = src.position();
                 doFlush(size);
@@ -227,18 +230,40 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
         // flush the current backing write buffer only if there's any pending data
         if (buffer.position() > 0)
         {
-//            logger.debug("JEB::BBDOSP::doFlush arg count = {}, buffer = {}, channel.isOpen() = {}, channel.isWritable() = {}, channel pending bytes = {}",
-//                         count, buffer, channel.isOpen(), channel.isWritable(), channel.unsafe().outboundBuffer().totalPendingWriteBytes());
-
             int byteCount = buffer.position();
             currentBuf.writerIndex(byteCount);
 
-            if (!Uninterruptibles.tryAcquireUninterruptibly(channelRateLimiter, byteCount, rateLimiterBlockTime, rateLimiterBlockTimeUnit))
+            try
+            {
+                if (!channelRateLimiter.tryAcquire(byteCount, rateLimiterBlockTime, rateLimiterBlockTimeUnit))
+                {
+                    throw new IOException(String.format("outbound channel was not writable. Failed to acquire sufficient permits %d", byteCount));
+                }
+            }
+            catch (InterruptedException e)
+            {
+                // TODO:JEB not sure this is right or desirable
                 throw new IOException(String.format("outbound channel was not writable. Failed to acquire sufficient permits %d", byteCount));
+            }
+            ChannelProgressivePromise promise = channel.newProgressivePromise();
+            promise.addListener(new ChannelProgressiveFutureListener()
+            {
+                public void operationProgressed(ChannelProgressiveFuture future, long progress, long total)
+                {
+                    channelRateLimiter.release(Ints.checkedCast(progress));
+                }
 
-            ChannelFuture channelFuture = channel.writeAndFlush(currentBuf);
-            channelFuture.addListener(future -> handleBuffer(future, byteCount));
-            futureConsumer.accept(channelFuture);
+                public void operationComplete(ChannelProgressiveFuture future)
+                {
+                    if (!future.isSuccess() && channel.isOpen())
+                        errorHandler.accept(future.cause());
+                }
+            });
+
+
+            channel.writeAndFlush(currentBuf, promise);
+//            promise.addListener(future -> handleBuffer(future, byteCount));
+            futureConsumer.accept(promise);
             currentBuf = channel.alloc().directBuffer(bufferSize, bufferSize);
             buffer = currentBuf.nioBuffer(0, bufferSize);
         }
@@ -254,7 +279,8 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
         channelRateLimiter.release(bytesWritten);
 
 //        if (logger.isTraceEnabled())
-//            logger.debug("JEB::BBDOSP::handleBuffer bytesWritten {} {} because {}", bytesWritten, future.isSuccess() ? "Succeeded" : "Failed", future.cause());
+//            logger.debug("JEB::BBDOSP::handleBuffer bytesWritten {} {} because {} - rateLimiter.availPermits",
+//                         bytesWritten, future.isSuccess() ? "Succeeded" : "Failed", future.cause(), channelRateLimiter.availablePermits());
 
         if (!future.isSuccess() && channel.isOpen())
             errorHandler.accept(future.cause());
@@ -289,7 +315,8 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
     {
         try
         {
-            doFlush(0);
+            if (channel.isOpen())
+                doFlush(0);
         }
         catch (ClosedChannelException cce)
         {

@@ -526,7 +526,6 @@ public class MessageIn<T>
         {
             while (in.isOpen() && !in.isEmpty())
             {
-                logger.debug("JEB::MI::process LOOP HEAD");
                 readPrefix(in);
                 messageHeader.from = peer;
                 messageHeader.verb = MessagingService.Verb.fromId(in.readInt());
@@ -536,15 +535,19 @@ public class MessageIn<T>
                     readParameterData(in, messageHeader);
 
                 messageHeader.payloadSize = Ints.checkedCast(VIntCoding.readUnsignedVInt(in));
-                logger.debug("JEB::MI::process - next message: id = {}, verb = {}, payload size = {}",
-                             messageHeader.messageId, messageHeader.verb, messageHeader.payloadSize);
                 MessageIn<Object> messageIn = MessageIn.read(in, messagingVersion,
                                                              messageHeader.messageId, messageHeader.constructionTime, messageHeader.from,
                                                              messageHeader.payloadSize, messageHeader.verb, messageHeader.parameters);
                 if (messageIn != null)
                 {
-                    logger.debug("JEB::MI::process - consuming next message: id = {}", messageHeader.messageId);
-                    messageConsumer.accept(messageIn, messageHeader.messageId);
+                    try
+                    {
+                        messageConsumer.accept(messageIn, messageHeader.messageId);
+                    }
+                    catch (Throwable t)
+                    {
+                        throw t;
+                    }
                 }
             }
         }
