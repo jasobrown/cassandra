@@ -27,6 +27,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
@@ -37,6 +40,8 @@ import org.apache.cassandra.io.util.RebufferingInputStream;
 
 public class RebufferingByteBufDataInputPlus extends RebufferingInputStream implements ReadableByteChannel
 {
+    public static final Logger logger = LoggerFactory.getLogger(RebufferingByteBufDataInputPlus.class);
+
     private static final long DEFAULT_REBUFFER_BLOCK_IN_MILLIS = TimeUnit.MINUTES.toMillis(3);
 
     /**
@@ -100,7 +105,10 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
         // atomic or volatile.
         int queuedCount = queuedByteCount.addAndGet(buf.readableBytes());
         if (channelConfig.isAutoRead() && queuedCount > highWaterMark)
+        {
+            logger.info("JEB::RBBDIS::append DISABLING AUTOREAD");
             channelConfig.setAutoRead(false);
+        }
 
         queue.add(buf);
     }
@@ -123,7 +131,10 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
         // possibly re-enable auto-read, *before* blocking on the queue, because if we block on the queue
         // without enabling auto-read we'll block forever :(
         if (!channelConfig.isAutoRead() && queuedByteCount.get() < lowWaterMark)
+        {
+            logger.info("JEB::RBBDIS::append ENABLING AUTOREAD");
             channelConfig.setAutoRead(true);
+        }
 
         try
         {

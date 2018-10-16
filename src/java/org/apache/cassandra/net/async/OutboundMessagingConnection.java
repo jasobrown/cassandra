@@ -19,14 +19,13 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.LinkedList;
-import java.util.List;
 import java.util.Queue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -47,6 +46,7 @@ import io.netty.channel.EventLoop;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.PromiseCombiner;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.Config;
@@ -200,6 +200,8 @@ public class OutboundMessagingConnection
      */
     private final EventLoop eventLoop;
 
+    private final ScheduledExecutorService consumerTaskThread;
+
     /**
      * A running count of the number of times we've tried to create a connection. Is reset upon a successful connection creation.
      *
@@ -257,6 +259,16 @@ public class OutboundMessagingConnection
 
         eventLoop = NettyFactory.instance.outboundGroup.next();
 
+        if (connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE)
+        {
+            String threadName = "MessagingService-NettyOutbound-" + connectionId.remote().toString() + "-LargeMessages";
+            consumerTaskThread = new ScheduledThreadPoolExecutor(1, new NamedThreadFactory(threadName));
+        }
+        else
+        {
+            consumerTaskThread = eventLoop;
+        }
+
         // We want to use the most precise protocol version we know because while there is version detection on connect(),
         // the target version might be accessed by the pool (in getConnection()) before we actually connect (as we
         // only connect when the first message is submitted). Note however that the only case where we'll connect
@@ -302,12 +314,9 @@ public class OutboundMessagingConnection
 
         backlog.offer(queuedMessage);
 
-        if (connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE)
-            logger.debug("{} JEB::OMC enqueuing large message = {}, size = {}", loggingTag(), queuedMessage, queuedMessage.message.serializedSize(targetVersion));
-
         // only schedule from a producer thread if the backlog was zero before this thread incremented it
         if (backlogSize.getAndIncrement() == 0)
-            eventLoop.submit(this::maybeStartDequeuing);
+            consumerTaskThread.submit(this::maybeStartDequeuing);
 
         return true;
     }
@@ -322,7 +331,7 @@ public class OutboundMessagingConnection
 
         if (backlogExpirationActive.compareAndSet(false, true))
         {
-            eventLoop.submit(this::expireMessages);
+            consumerTaskThread.submit(this::expireMessages);
             return true;
         }
 
@@ -401,7 +410,7 @@ public class OutboundMessagingConnection
         return messageDequeuer.dequeueMessages();
     }
 
-    interface MessageDequeuer
+    abstract class MessageDequeuer
     {
         /**
          * Pull messages off the {@link #backlog} and write them to the netty channel until we can flush (or hit an upper bound).
@@ -409,12 +418,27 @@ public class OutboundMessagingConnection
          *
          * Note: executes on the netty event loop.
          */
-        boolean dequeueMessages();
+        abstract boolean dequeueMessages();
 
-        void close();
+        abstract void close();
+
+        void updateCountersAfterDequeue(int dequeuedMessages, int sendMessageCount)
+        {
+            // only update the Atomic fields if we actually did anything
+            if (dequeuedMessages == 0)
+                return;
+
+            backlogSize.addAndGet(-dequeuedMessages);
+
+            if (sendMessageCount > 0)
+                completedMessageCount.addAndGet(sendMessageCount);
+            int droppedMessages = dequeuedMessages - sendMessageCount;
+            if (droppedMessages > 0)
+                droppedMessageCount.addAndGet(droppedMessages);
+        }
     }
 
-    class SimpleMessageDequeuer implements MessageDequeuer
+    class SimpleMessageDequeuer extends MessageDequeuer
     {
         /**
          * A reusable array to capture messages to send after they are dequeued.
@@ -480,7 +504,7 @@ public class OutboundMessagingConnection
             }
 
             if (!backlog.isEmpty())
-                eventLoop.submit(OutboundMessagingConnection.this::maybeStartDequeuing);
+                consumerTaskThread.submit(OutboundMessagingConnection.this::maybeStartDequeuing);
 
             return sendMessageCount > 0;
         }
@@ -518,156 +542,123 @@ public class OutboundMessagingConnection
             }
         }
 
-        private void updateCountersAfterDequeue(int dequeuedMessages, int sendMessageCount)
-        {
-            // only update the Atomic fields if we actually did anything
-            if (dequeuedMessages == 0)
-                return;
-
-            backlogSize.addAndGet(-dequeuedMessages);
-
-            if (sendMessageCount > 0)
-                completedMessageCount.addAndGet(sendMessageCount);
-            int droppedMessages = dequeuedMessages - sendMessageCount;
-            if (droppedMessages > 0)
-                droppedMessageCount.addAndGet(droppedMessages);
-        }
-
         public void close()
         {  /* nop */  }
     }
 
-    class LargeMessageMessageDequeuer implements MessageDequeuer
+    class LargeMessageDequeuer extends MessageDequeuer
     {
-        private static final int DEFAULT_BUFFER_SIZE = 64 * 1024;
-        private final ThreadPoolExecutor svc;
+        private static final int DEFAULT_BUFFER_SIZE = 32 * 1024;
 
         /**
          * Reatin a local reference to the channel to avoid any visibilty issues with the parent class's {@link #channel}.
          */
         private final Channel channel;
 
-        LargeMessageMessageDequeuer(Channel channel)
+        private PromiseCombiner promiseCombiner;
+
+        private final DataOutputStreamPlus output;
+
+        LargeMessageDequeuer(Channel channel)
         {
             this.channel = channel;
-            String threadName = "MessagingService-NettyOutbound-" + connectionId.remote().toString() + "-LargeMessages";
-            svc = new ThreadPoolExecutor(1, 1, 5L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), new NamedThreadFactory(threadName));
-            svc.allowCoreThreadTimeOut(true);
+
+            output = ByteBufDataOutputStreamPlus.create(channel, DEFAULT_BUFFER_SIZE, this::handleError,
+                                                        30, TimeUnit.SECONDS, this::handleFuture);
+
+
+            // change this to keep the channel's COB from squwking all the damn time. plus, we are using the watermark
+            // & channel writability flags anyway!
+            // also, set this *after* creating the ByteBufDataOutputStreamPlus, as it's ctor looks at the channel's high water mark
+            channel.config().setWriteBufferHighWaterMark(1 << 24);
         }
 
         /**
-         * Pulls, at most, one message off the {@link #backlog}, and adds it to {@link #svc} for
-         * serialization off the event loop.
-         *
-         * remember - called on the event loop!
+         * remember - called on the consumer task thread - not the netty event loop!
          */
         public boolean dequeueMessages()
         {
             final long timestampNanos = System.nanoTime();
+            int dequeuedMessages = 0;
+            int sendMessageCount = 0;
+
             QueuedMessage next;
-            while ((next = backlog.poll()) != null)
+            while (!closed && (next = backlog.poll()) != null)
             {
-                backlogSize.decrementAndGet();
+                dequeuedMessages++;
                 if (!next.isTimedOut(timestampNanos))
                 {
-                    ChannelPromise promise = channel.newPromise();
-                    svc.submit(new LargeMessageWriteTask(next, promise));
-                    return true;
-                }
-                else
-                {
-                    droppedMessageCount.decrementAndGet();
+                    sendDequeuedMessage(next);
+                    sendMessageCount++;
                 }
             }
-            return false;
+
+            updateCountersAfterDequeue(dequeuedMessages, sendMessageCount);
+            return sendMessageCount > 0;
+        }
+
+        void sendDequeuedMessage(QueuedMessage message)
+        {
+            try
+            {
+                promiseCombiner = new PromiseCombiner();
+                message.message.serialize(output, targetVersion, connectionId, message.id, message.timestampNanos);
+                output.flush();
+
+                // as the promises for each of the chunks (via ByteBufDataOutputStreamPlus) will be fulfilled on the event loop,
+                // handleMessageResult will also be handled on the event loop (which is what we want). thus no need to schedule to a different thread.
+                ChannelPromise finalPromise = channel.newPromise();
+                finalPromise.addListener(OutboundMessagingConnection.this::handleMessageResult);
+                promiseCombiner.finish(finalPromise);
+            }
+            catch (Throwable t)
+            {
+                ChannelPromise promise = channel.newPromise();
+                promise.tryFailure(new IOException(t));
+                eventLoop.submit(() -> handleMessageResult(promise));
+            }
+            finally
+            {
+                promiseCombiner = null;
+            }
+        }
+
+        /**
+         * Callback from {@link ByteBufDataOutputStreamPlus} when it sends a buffer to the netty channel.
+         *
+         * Note: called on the same thread as {@link #sendDequeuedMessage(QueuedMessage)}.
+         */
+        void handleFuture(Future promise)
+        {
+            promiseCombiner.add(promise);
+        }
+
+        /**
+         * Callback from {@link ByteBufDataOutputStreamPlus} when an error occurs trying to writing *within* the pipeline.
+         * Think of this method as an express mechanism to know when the pipeline fails, such that we don't need
+         * to have {@link #sendDequeuedMessage(QueuedMessage)} wait for all the futures to be created (they might never be created).
+         *
+         * Note: invoked on the netty event loop.
+         */
+        void handleError(Throwable t)
+        {
+            // failing the promise here will eventually lead back to OMC.handleMessageResult, which closes the channel,
+            // and closes this ChannelWriter eventually, as well.
+
+            logger.info("JEB::OMC::LMD::handleError - is this thing even used!?!?!?", t);
         }
 
         public void close()
         {
-            svc.shutdownNow();
-        }
-
-        private class LargeMessageWriteTask implements Runnable
-        {
-            private final QueuedMessage currentMessage;
-
-            private final ChannelPromise promise;
-
-            // a poor-man's thread-safe version of netty's PromiseCombiner.
-            private final List<Future> promises;
-
-            private LargeMessageWriteTask(QueuedMessage currentMessage, ChannelPromise aggregatePromise)
+            try
             {
-                this.currentMessage = currentMessage;
-                this.promise = aggregatePromise;
-
-                int expectedPromises = (currentMessage.message.serializedSize(targetVersion) / DEFAULT_BUFFER_SIZE) + 1;
-                promises = new ArrayList<>(expectedPromises);
+                consumerTaskThread.shutdown();
+                output.close();
             }
-
-            @SuppressWarnings("resource")
-            public void run()
+            catch (IOException e)
             {
-                int minBufferSize = Math.min(currentMessage.message.serializedSize(targetVersion), DEFAULT_BUFFER_SIZE);
-
-                try
-                {
-                    DataOutputStreamPlus output = ByteBufDataOutputStreamPlus.create(channel, minBufferSize, this::handleError,
-                                                                                     30, TimeUnit.SECONDS, this::handleFuture);
-                    logger.debug("{} JEB::OMC sending large message = {}, size = {}", loggingTag(), currentMessage, currentMessage.message.serializedSize(targetVersion));
-                    currentMessage.message.serialize(output, targetVersion, connectionId, currentMessage.id, currentMessage.timestampNanos);
-                    output.flush();
-                    logger.debug("{} JEB::OMC sent large message = {}, size = {}", loggingTag(), currentMessage, currentMessage.message.serializedSize(targetVersion));
-
-                    // need to wait until *all* promises are created & return successfully before we can declare success on this message.
-                    for (Future<?> future : promises)
-                    {
-                        // optimize for the success path
-                        if (future.isSuccess())
-                            continue;
-
-                        if (!future.awaitUninterruptibly(30, TimeUnit.SECONDS))
-                            throw new IOException("future failed to fulfilled within the time limit");
-
-                        if (!future.isSuccess())
-                            throw future.cause();
-                    }
-                    promise.trySuccess();
-                    completedMessageCount.incrementAndGet();
-                }
-                catch (Throwable t)
-                {
-                    promise.tryFailure(new IOException(t));
-                }
-                finally
-                {
-                    logger.debug("{} JEB::OMC finished sending a large message:: id = {}", loggingTag(), currentMessage.id);
-                    eventLoop.submit(() -> handleMessageResult(promise));
-                }
-            }
-
-            /**
-             * Callback from {@link ByteBufDataOutputStreamPlus} when it sends a buffer to the netty channel.
-             *
-             * Note: called on the same thread as {@link #run()}.
-             */
-            void handleFuture(Future promise)
-            {
-                promises.add(promise);
-            }
-
-            /**
-             * Callback from {@link ByteBufDataOutputStreamPlus} when an error occurs trying to writing *within* the pipeline.
-             * Think of this method as an express mechanism to know when the pipeline fails, such that we don't need
-             * to have {@link #run()} wait for all the futures to be created (they might never be created).
-             *
-             * Note: invoked on the netty event loop.
-             */
-            void handleError(Throwable t)
-            {
-                // failing the promise here will eventually lead back to OMC.handleMessageResult, which closes the channel,
-                // and closes this ChannelWriter eventually, as well.
-                promise.tryFailure(t);
+                if (logger.isDebugEnabled())
+                    logger.debug("failed to close an output strezm for sending large messages, ignoring as we are closing", e);
             }
         }
     }
@@ -688,20 +679,20 @@ public class OutboundMessagingConnection
         {
             // explicitly check if the backlog queue is empty as we haven't necessarily decremented the backlogSize
             // by the time this handler is invoked.
-            if (!backlog.isEmpty())
+            if (!backlog.isEmpty())  // TODO:JEB this will overschedule wrt large message thread
             {
                 // not calling dequeueMessages explicitly here (and instead scheduling the task) as we can get here directly in-line
                 // from dequeueMessages if the buffers were able to be flushed immediately to the socket. the problem we
                 // would run into is that if the backlog is constantly > 0, we would creating a huge stack size due to the recursively
                 // calling dequeueMessages, and b) we starve other consumers waiting to execute.
-                eventLoop.submit(this::maybeStartDequeuing);
+                consumerTaskThread.submit(this::maybeStartDequeuing);
             }
             return;
         }
 
         JVMStabilityInspector.inspectThrowable(cause);
 
-        if (cause instanceof IOException || cause.getCause() instanceof IOException)
+        if (cause instanceof IOException || (cause.getCause() != null && cause.getCause() instanceof IOException))
         {
             if (shouldPurgeBacklog(channel))
                 purgeBacklog();
@@ -719,7 +710,7 @@ public class OutboundMessagingConnection
             logger.error("{} Unexpected error writing", loggingTag(), cause);
         }
 
-        eventLoop.submit(this::maybeStartDequeuing);
+        consumerTaskThread.submit(this::maybeStartDequeuing);
     }
 
     private boolean shouldPurgeBacklog(Channel channel)
@@ -971,7 +962,7 @@ public class OutboundMessagingConnection
     private MessageDequeuer deriveMessageDequeuer(OutboundConnectionIdentifier connectionId, Channel channel)
     {
         return connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE
-               ? new LargeMessageMessageDequeuer(channel)
+               ? new LargeMessageDequeuer(channel)
                : new SimpleMessageDequeuer();
     }
 
@@ -1013,7 +1004,7 @@ public class OutboundMessagingConnection
      *
      * Note: this will not be invoked on the event loop.
      */
-    Future<?> reconnectWithNewIp(InetAddressAndPort newAddr)
+    java.util.concurrent.Future<?> reconnectWithNewIp(InetAddressAndPort newAddr)
     {
         // if we're closed, ignore the request
         if (closed)
@@ -1021,7 +1012,7 @@ public class OutboundMessagingConnection
 
         connectionId = connectionId.withNewConnectionAddress(newAddr);
 
-        return eventLoop.submit(() -> {
+        return consumerTaskThread.submit(() -> {
             if (channel != null)
                 softClose();
         });
@@ -1057,25 +1048,33 @@ public class OutboundMessagingConnection
         if (!softClose)
             closed = true;
 
-        eventLoop.submit(() -> {
-            cleanupConnectArtifacts(true);
+        try
+        {
+            consumerTaskThread.submit(() -> {
+                cleanupConnectArtifacts(true);
 
-            // drain the backlog
-            if (channel != null)
-            {
-                if (softClose)
+                // drain the backlog
+                if (channel != null)
                 {
-                    softClose();
-                }
-                else
-                {
-                    purgeBacklog();
-                    channel.close();
+                    if (softClose)
+                    {
+                        softClose();
+                    }
+                    else
+                    {
+                        purgeBacklog();
+                        channel.close();
+                    }
+
+                    messageDequeuer.close();
                 }
 
-                messageDequeuer.close();
-            }
-        }).awaitUninterruptibly(5, TimeUnit.SECONDS);
+            }).get(5, TimeUnit.SECONDS);
+        }
+        catch (InterruptedException | ExecutionException | TimeoutException e)
+        {
+            // ignore any errors
+        }
     }
 
     @Override
