@@ -48,6 +48,7 @@ import org.junit.runners.Parameterized.Parameters;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.RequestFailureReason;
@@ -117,9 +118,9 @@ public class MessageInHandlerTest
         });
     }
 
-        private MessageInHandler getHandler(InetAddressAndPort addr, BiConsumer<MessageIn, Integer> messageConsumer)
+    private MessageInHandler getHandler(InetAddressAndPort addr, Channel channel, BiConsumer<MessageIn, Integer> messageConsumer)
     {
-        return new MessageInHandler(addr, MessageIn.getProcessor(addr, messagingVersion, messageConsumer), handlesLargeMessages);
+        return new MessageInHandler(addr, channel, MessageIn.getProcessor(addr, messagingVersion, messageConsumer), handlesLargeMessages);
     }
 
     @Test
@@ -152,8 +153,9 @@ public class MessageInHandlerTest
         serialize(msgOut, MSG_ID);
 
         MessageInConsumer consumer = new MessageInConsumer(1);
-        MessageInHandler handler = getHandler(addr, consumer.messageConsumer);
-        EmbeddedChannel channel = new EmbeddedChannel(handler);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        MessageInHandler handler = getHandler(addr, channel, consumer.messageConsumer);
+        channel.pipeline().addLast(handler);
         channel.writeInbound(buf);
 
         // need to wait until async tasks are complete, as large messages spin up a background thread
@@ -190,8 +192,9 @@ public class MessageInHandlerTest
 
         MessageInConsumer consumer = new MessageInConsumer(1);
         MessageInProcessor processor = MessageIn.getProcessor(addr, messagingVersion, consumer.messageConsumer);
-        MessageInHandler handler = new MessageInHandler(addr, processor, handlesLargeMessages);
-        EmbeddedChannel channel = new EmbeddedChannel(handler);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        MessageInHandler handler = new MessageInHandler(addr, channel, processor, handlesLargeMessages);
+        channel.pipeline().addLast(handler);
         channel.writeInbound(buf);
 
         Assert.assertEquals(1, consumer.latch.getCount());
@@ -217,8 +220,9 @@ public class MessageInHandlerTest
     @Test
     public void exceptionHandled()
     {
-        MessageInHandler handler = getHandler(addr, null);
-        EmbeddedChannel channel = new EmbeddedChannel(handler);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        MessageInHandler handler = getHandler(addr, channel, null);
+        channel.pipeline().addLast(handler);
         Assert.assertTrue(channel.isOpen());
         handler.exceptionCaught(channel.pipeline().firstContext(), new EOFException());
         Assert.assertFalse(channel.isOpen());
@@ -259,8 +263,9 @@ public class MessageInHandlerTest
 
         int messageCount = 3;
         MessageInConsumer consumer = new MessageInConsumer(messageCount);
-        MessageInHandler handler = getHandler(addr, consumer.messageConsumer);
-        EmbeddedChannel channel = new EmbeddedChannel(handler);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        MessageInHandler handler = getHandler(addr, channel, consumer.messageConsumer);
+        channel.pipeline().addLast(handler);
         Assert.assertTrue(channel.isOpen());
         channel.writeOneInbound(buf);
 

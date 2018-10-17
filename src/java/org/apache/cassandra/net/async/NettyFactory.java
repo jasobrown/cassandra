@@ -85,7 +85,7 @@ public final class NettyFactory
     public static final String INBOUND_STREAM_HANDLER_NAME = "inboundStreamHandler";
 
     /** a useful addition for debugging; simply set to true to get more data in your logs */
-    private static final boolean WIRETRACE = false;
+    private static final boolean WIRETRACE = true;
     static
     {
         if (WIRETRACE)

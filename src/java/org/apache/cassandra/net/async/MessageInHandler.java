@@ -31,6 +31,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.codec.ByteToMessageDecoder;
@@ -50,22 +51,15 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
     private final InetAddressAndPort peer;
 
     private final BufferHandler bufferHandler;
-    private final boolean handlesLargeMessages;
     private volatile boolean closed;
 
-    public MessageInHandler(InetAddressAndPort peer, MessageInProcessor messageProcessor, boolean handlesLargeMessages)
+    public MessageInHandler(InetAddressAndPort peer, Channel channel, MessageInProcessor messageProcessor, boolean handlesLargeMessages)
     {
         this.peer = peer;
-        this.handlesLargeMessages = handlesLargeMessages;
 
         bufferHandler = handlesLargeMessages
-                        ? new BlockingBufferHandler(messageProcessor)
+                        ? new BlockingBufferHandler(channel, messageProcessor)
                         : new NonblockingBufferHandler(messageProcessor);
-    }
-
-    public void channelActive(ChannelHandlerContext ctx)
-    {
-        bufferHandler.channelActive(ctx);
     }
 
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws IOException
@@ -122,11 +116,6 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
      */
     interface BufferHandler
     {
-        default void channelActive(ChannelHandlerContext ctx)
-        {
-            // nop
-        }
-
         void channelRead(ChannelHandlerContext ctx, ByteBuf in) throws IOException;
 
         void close();
@@ -216,10 +205,11 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
 
         private final AtomicBoolean executing;
 
-        BlockingBufferHandler(MessageInProcessor messageProcessor)
+        BlockingBufferHandler(Channel channel, MessageInProcessor messageProcessor)
         {
             this.messageProcessor = messageProcessor;
             executing = new AtomicBoolean(false);
+            queuedBuffers = new RebufferingByteBufDataInputPlus(channel, QUEUED_BUFFERS_REBUFFER_MILLIS);
 
             // bound the LBQ to a handful element so we don't inadvertently add a bunch of empty tasks to the queue,
             // but we need more than one to allow for the current executing task (so it can exit) and an entry after it
@@ -233,7 +223,6 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
 
         public void channelActive(ChannelHandlerContext ctx)
         {
-            queuedBuffers = new RebufferingByteBufDataInputPlus(ctx.channel(), QUEUED_BUFFERS_REBUFFER_MILLIS);
         }
 
         /**
