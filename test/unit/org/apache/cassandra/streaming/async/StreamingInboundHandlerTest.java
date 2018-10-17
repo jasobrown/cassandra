@@ -67,7 +67,7 @@ public class StreamingInboundHandlerTest
     {
         handler = new StreamingInboundHandler(REMOTE_ADDR, VERSION, null);
         channel = new EmbeddedChannel(handler);
-        buffers = new RebufferingByteBufDataInputPlus(1 << 9, 1 << 10, channel.config());
+        buffers = new RebufferingByteBufDataInputPlus(1 << 9, 1 << 10, channel);
         handler.setPendingBuffers(buffers);
     }
 
@@ -118,7 +118,7 @@ public class StreamingInboundHandlerTest
     }
 
     @Test
-    public void StreamDeserializingTask_deriveSession_StreamInitMessage() throws InterruptedException, IOException
+    public void StreamDeserializingTask_deriveSession_StreamInitMessage() throws IOException
     {
         StreamInitMessage msg = new StreamInitMessage(REMOTE_ADDR, 0, UUID.randomUUID(), StreamOperation.REPAIR, UUID.randomUUID(), PreviewKind.ALL);
         StreamingInboundHandler.StreamDeserializingTask task = handler.new StreamDeserializingTask(sid -> createSession(sid), null, channel);

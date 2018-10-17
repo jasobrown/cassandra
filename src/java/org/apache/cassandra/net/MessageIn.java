@@ -524,7 +524,7 @@ public class MessageIn<T>
 
         public void process(RebufferingByteBufDataInputPlus in) throws IOException
         {
-            // TODO:JEB check   me out
+            // TODO:JEB check me out
             while (in.isOpen())// && !in.isEmpty())
             {
                 readPrefix(in);

@@ -47,7 +47,7 @@ public class RebufferingByteBufDataInputPlusTest
     public void setUp()
     {
         channel = new EmbeddedChannel();
-        inputPlus = new RebufferingByteBufDataInputPlus(LOW_WATER_MARK, HIGH_WATER_MARK, channel.config());
+        inputPlus = new RebufferingByteBufDataInputPlus(LOW_WATER_MARK, HIGH_WATER_MARK, channel);
     }
 
     @After
@@ -258,7 +258,7 @@ public class RebufferingByteBufDataInputPlusTest
     public void rebufferTimeout() throws IOException
     {
         long timeoutMillis = 1000;
-        inputPlus = new RebufferingByteBufDataInputPlus(10, 20, channel.config(), timeoutMillis);
+        inputPlus = new RebufferingByteBufDataInputPlus(10, 20, channel, timeoutMillis);
 
         long startNanos = System.nanoTime();
         try
