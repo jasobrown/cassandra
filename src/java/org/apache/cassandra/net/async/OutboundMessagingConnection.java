@@ -1110,6 +1110,12 @@ public class OutboundMessagingConnection
     }
 
     @VisibleForTesting
+    void setChannel(Channel channel)
+    {
+        this.channel = channel;
+    }
+
+    @VisibleForTesting
     void setTargetVersion(int targetVersion)
     {
         this.targetVersion = targetVersion;

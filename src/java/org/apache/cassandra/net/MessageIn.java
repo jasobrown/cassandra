@@ -524,7 +524,8 @@ public class MessageIn<T>
 
         public void process(RebufferingByteBufDataInputPlus in) throws IOException
         {
-            while (in.isOpen() && !in.isEmpty())
+            // TODO:JEB check me out
+            while (in.isOpen())// && !in.isEmpty())
             {
                 readPrefix(in);
                 messageHeader.from = peer;
@@ -679,7 +680,8 @@ public class MessageIn<T>
 
         public void process(RebufferingByteBufDataInputPlus in) throws IOException
         {
-            while (in.isOpen() && !in.isEmpty())
+            // TODO:JEB check me out
+            while (in.isOpen())// && !in.isEmpty())
             {
                 readPrefix(in);
                 messageHeader.from = CompactEndpointSerializationHelper.instance.deserialize(in, messagingVersion);

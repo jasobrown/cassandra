@@ -27,12 +27,14 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.google.common.primitives.Ints;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelConfig;
 import io.netty.util.ReferenceCountUtil;
 import org.apache.cassandra.io.util.BufferedDataOutputStreamPlus;
@@ -43,6 +45,7 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
     public static final Logger logger = LoggerFactory.getLogger(RebufferingByteBufDataInputPlus.class);
 
     private static final long DEFAULT_REBUFFER_BLOCK_IN_MILLIS = TimeUnit.MINUTES.toMillis(3);
+    private final Channel channel;
 
     /**
      * The parent, or owning, buffer of the current buffer being read from ({@link super#buffer}).
@@ -56,8 +59,8 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
      */
     private final AtomicInteger queuedByteCount;
 
-    private final int lowWaterMark;
-    private final int highWaterMark;
+//    private final int lowWaterMark;
+//    private final int highWaterMark;
     private final ChannelConfig channelConfig;
     private final long rebufferBlockInMillis;
 
@@ -76,12 +79,34 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
             throw new IllegalArgumentException(String.format("low water mark is greater than high water mark: %d vs %d", lowWaterMark, highWaterMark));
 
         currentBuf = Unpooled.EMPTY_BUFFER;
-        this.lowWaterMark = lowWaterMark;
-        this.highWaterMark = highWaterMark;
+//        this.lowWaterMark = lowWaterMark;
+//        this.highWaterMark = highWaterMark;
         this.channelConfig = channelConfig;
         this.rebufferBlockInMillis = rebufferBlockInMillis;
         queue = new LinkedBlockingQueue<>();
         queuedByteCount = new AtomicInteger();
+
+        channel = null;
+    }
+
+    public RebufferingByteBufDataInputPlus(int lowWaterMark, int highWaterMark, Channel channel, long rebufferBlockInMillis)
+    {
+        // TODO:JEB clean me up if useful
+
+        super(Unpooled.EMPTY_BUFFER.nioBuffer());
+
+        if (lowWaterMark > highWaterMark)
+            throw new IllegalArgumentException(String.format("low water mark is greater than high water mark: %d vs %d", lowWaterMark, highWaterMark));
+
+        currentBuf = Unpooled.EMPTY_BUFFER;
+//        this.lowWaterMark = lowWaterMark;
+//        this.highWaterMark = highWaterMark;
+        this.channelConfig = channel.config();
+        this.rebufferBlockInMillis = rebufferBlockInMillis;
+        queue = new LinkedBlockingQueue<>();
+        queuedByteCount = new AtomicInteger();
+
+        this.channel = channel;
     }
 
     /**
@@ -99,16 +124,16 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
             throw new IllegalStateException("stream is already closed, so cannot add another buffer");
         }
 
-        // this slightly undercounts the live count as it doesn't include the currentBuf's size.
-        // that's ok as the worst we'll do is allow another buffer in and add it to the queue,
-        // and that point we'll disable auto-read. this is a tradeoff versus making some other member field
-        // atomic or volatile.
-        int queuedCount = queuedByteCount.addAndGet(buf.readableBytes());
-        if (channelConfig.isAutoRead() && queuedCount > highWaterMark)
-        {
-            logger.info("JEB::RBBDIS::append DISABLING AUTOREAD");
-            channelConfig.setAutoRead(false);
-        }
+//        // this slightly undercounts the live count as it doesn't include the currentBuf's size.
+//        // that's ok as the worst we'll do is allow another buffer in and add it to the queue,
+//        // and that point we'll disable auto-read. this is a tradeoff versus making some other member field
+//        // atomic or volatile.
+//        int queuedCount = queuedByteCount.addAndGet(buf.readableBytes());
+//        if (channelConfig.isAutoRead() && queuedCount > highWaterMark)
+//        {
+//            logger.info("JEB::RBBDIS::append DISABLING AUTOREAD");
+//            channelConfig.setAutoRead(false);
+//        }
 
         queue.add(buf);
     }
@@ -130,11 +155,15 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
 
         // possibly re-enable auto-read, *before* blocking on the queue, because if we block on the queue
         // without enabling auto-read we'll block forever :(
-        if (!channelConfig.isAutoRead() && queuedByteCount.get() < lowWaterMark)
-        {
-            logger.info("JEB::RBBDIS::append ENABLING AUTOREAD");
-            channelConfig.setAutoRead(true);
-        }
+//        if (!channelConfig.isAutoRead() && queuedByteCount.get() < lowWaterMark)
+//        {
+//            logger.info("JEB::RBBDIS::append ENABLING AUTOREAD");
+//            channelConfig.setAutoRead(true);
+//        }
+
+        // TODO:JEB clean me up is useful
+        if (queue.isEmpty() && channel != null)
+            channel.read();
 
         try
         {
@@ -189,20 +218,18 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
      *
      * @throws EOFException thrown when no bytes are buffered and {@link #closed} is true.
      */
-    @Override
-    public int available() throws EOFException
+    public int unsafeAvailable()
     {
-       final int availableBytes = queuedByteCount.get() + (buffer != null ? buffer.remaining() : 0);
+        long count = buffer != null ? buffer.remaining() : 0;
+        for (ByteBuf buf : queue)
+            count += buf.readableBytes();
 
-        if (availableBytes == 0 && closed)
-            throw new EOFException();
-
-        return availableBytes;
+        return Ints.checkedCast(count);
     }
 
-    public boolean isEmpty() throws EOFException
+    public boolean isEmpty()
     {
-        return available() == 0;
+        return !queue.isEmpty() || buffer.position() < buffer.limit();
     }
 
     /**
@@ -214,22 +241,22 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
      * @return true if, when this method returns, autoREad is enabled; else, false.
      * @throws EOFException thrown if this instance is closed.
      */
-    public boolean maybeEnableAutoRead() throws EOFException
-    {
-        if (closed)
-            throw new EOFException();
-
-        if (channelConfig.isAutoRead())
-            return true;
-
-        if (available() <= highWaterMark)
-        {
-            channelConfig.setAutoRead(true);
-            return true;
-        }
-
-        return false;
-    }
+//    public boolean maybeEnableAutoRead() throws EOFException
+//    {
+//        if (closed)
+//            throw new EOFException();
+//
+//        if (channelConfig.isAutoRead())
+//            return true;
+//
+//        if (available() <= highWaterMark)
+//        {
+//            channelConfig.setAutoRead(true);
+//            return true;
+//        }
+//
+//        return false;
+//    }
 
     @Override
     public boolean isOpen()

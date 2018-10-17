@@ -50,15 +50,24 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
     private final InetAddressAndPort peer;
 
     private final BufferHandler bufferHandler;
+    private final boolean handlesLargeMessages;
     private volatile boolean closed;
 
     public MessageInHandler(InetAddressAndPort peer, MessageInProcessor messageProcessor, boolean handlesLargeMessages)
     {
         this.peer = peer;
+        this.handlesLargeMessages = handlesLargeMessages;
 
         bufferHandler = handlesLargeMessages
                         ? new BlockingBufferHandler(messageProcessor)
                         : new NonblockingBufferHandler(messageProcessor);
+    }
+
+    public void channelActive(ChannelHandlerContext ctx)
+    {
+        // TODO:JEB clean me up if useful - wrt BlockingBufferHandler creating queue in read()
+        if (handlesLargeMessages)
+            ctx.channel().config().setAutoRead(false);
     }
 
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws IOException
@@ -240,7 +249,7 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
             {
                 queuedBuffers = new RebufferingByteBufDataInputPlus(QUEUE_LOW_WATER_MARK,
                                                                     QUEUE_HIGH_WATER_MARK,
-                                                                    ctx.channel().config(),
+                                                                    ctx.channel(),
                                                                     QUEUED_BUFFERS_REBUFFER_MILLIS);
             }
 
@@ -291,17 +300,10 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
             {
                 executing.set(false);
 
-                try
-                {
-                    // if we are racing with channelRead(), go ahead and add another task to the queue
-                    // as the number of tasks in the queue is bounded (and we throw away any rejection exceptions)
-                    if (!closed && !queuedBuffers.isEmpty())
-                        executorService.submit(() -> processInBackground(ctx));
-                }
-                catch (EOFException e)
-                {
-                    // nop. If we got an EOF, we're done processing any data anyway.
-                }
+                // if we are racing with channelRead(), go ahead and add another task to the queue
+                // as the number of tasks in the queue is bounded (and we throw away any rejection exceptions)
+                if (!closed && !queuedBuffers.isEmpty())
+                    executorService.submit(() -> processInBackground(ctx));
             }
         }
 

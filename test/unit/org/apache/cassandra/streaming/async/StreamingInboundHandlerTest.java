@@ -18,9 +18,7 @@
 
 package org.apache.cassandra.streaming.async;
 
-import java.io.EOFException;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.UUID;
 
 import com.google.common.net.InetAddresses;
@@ -33,8 +31,6 @@ import org.junit.Test;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.io.sstable.format.SSTableFormat;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.async.RebufferingByteBufDataInputPlus;
 import org.apache.cassandra.schema.TableId;
@@ -45,10 +41,10 @@ import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.async.StreamingInboundHandler.SessionIdentifier;
 import org.apache.cassandra.streaming.messages.CompleteMessage;
-import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.streaming.messages.IncomingStreamMessage;
 import org.apache.cassandra.streaming.messages.StreamInitMessage;
 import org.apache.cassandra.streaming.messages.StreamMessage;
+import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 
 public class StreamingInboundHandlerTest
 {
@@ -88,19 +84,19 @@ public class StreamingInboundHandlerTest
     }
 
     @Test
-    public void channelRead_Normal() throws EOFException
+    public void channelRead_Normal() throws IOException
     {
         Assert.assertEquals(0, buffers.available());
         int size = 8;
         buf = channel.alloc().buffer(size);
         buf.writerIndex(size);
         channel.writeInbound(buf);
-        Assert.assertEquals(size, buffers.available());
+        Assert.assertEquals(size, buffers.unsafeAvailable());
         Assert.assertFalse(channel.releaseInbound());
     }
 
-    @Test (expected = EOFException.class)
-    public void channelRead_Closed() throws EOFException
+    @Test
+    public void channelRead_Closed() throws IOException
     {
         int size = 8;
         buf = channel.alloc().buffer(size);
@@ -114,7 +110,7 @@ public class StreamingInboundHandlerTest
     }
 
     @Test
-    public void channelRead_WrongObject() throws EOFException
+    public void channelRead_WrongObject() throws IOException
     {
         channel.writeInbound("homer");
         Assert.assertEquals(0, buffers.available());

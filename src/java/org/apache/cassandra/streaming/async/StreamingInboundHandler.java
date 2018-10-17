@@ -166,12 +166,11 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
                 {
                     // do a check of available bytes and possibly sleep some amount of time (then continue).
                     // this way we can break out of run() sanely or we end up blocking indefintely in StreamMessage.deserialize()
-                    while (buffers.available() == 0)
+                    while (buffers.isEmpty())
                     {
                         if (closed)
                             return;
 
-                        buffers.maybeEnableAutoRead();
                         Uninterruptibles.sleepUninterruptibly(400, TimeUnit.MILLISECONDS);
                     }
 

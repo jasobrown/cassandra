@@ -90,10 +90,7 @@ public class OutboundMessagingConnectionTest
         omc = new OutboundMessagingConnection(connectionId, null, null, new AllowAllInternodeAuthenticator(), BACKLOG_PURGE_SIZE, BACKLOG_MAX_DEPTH);
         channel = new EmbeddedChannel();
         channel.attr(OutboundMessagingConnection.PURGE_MESSAGES_CHANNEL_ATTR).set(false);
-        OutboundConnectionParams params = OutboundConnectionParams.builder()
-                                                                  .connectionId(connectionId)
-                                                                  .protocolVersion(MESSAGING_VERSION)
-                                                                  .build();
+        omc.setChannel(channel);
         snitch = DatabaseDescriptor.getEndpointSnitch();
         encryptionOptions = DatabaseDescriptor.getInternodeMessagingEncyptionOptions();
     }
