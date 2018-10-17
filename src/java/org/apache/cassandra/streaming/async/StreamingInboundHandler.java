@@ -59,10 +59,7 @@ import static org.apache.cassandra.streaming.async.NettyStreamingMessageSender.c
 public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
 {
     private static final Logger logger = LoggerFactory.getLogger(StreamingInboundHandler.class);
-    static final Function<SessionIdentifier, StreamSession> DEFAULT_SESSION_PROVIDER = sid -> StreamManager.instance.findSession(sid.from, sid.planId, sid.sessionIndex);
-
-    private static final int AUTO_READ_LOW_WATER_MARK = 1 << 15;
-    private static final int AUTO_READ_HIGH_WATER_MARK = 1 << 20;
+    private static final Function<SessionIdentifier, StreamSession> DEFAULT_SESSION_PROVIDER = sid -> StreamManager.instance.findSession(sid.from, sid.planId, sid.sessionIndex);
 
     private final InetAddressAndPort remoteAddress;
     private final int protocolVersion;
@@ -92,7 +89,7 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
     @SuppressWarnings("resource")
     public void handlerAdded(ChannelHandlerContext ctx)
     {
-        buffers = new RebufferingByteBufDataInputPlus(AUTO_READ_LOW_WATER_MARK, AUTO_READ_HIGH_WATER_MARK, ctx.channel());
+        buffers = new RebufferingByteBufDataInputPlus(ctx.channel());
         Thread blockingIOThread = new FastThreadLocalThread(new StreamDeserializingTask(DEFAULT_SESSION_PROVIDER, session, ctx.channel()),
                                                             String.format("Stream-Deserializer-%s-%s", remoteAddress.toString(), ctx.channel().id()));
         blockingIOThread.setDaemon(true);
@@ -164,12 +161,10 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
             {
                 while (true)
                 {
-                    logger.info("JEB::SIH::StreamDeser HEAD of while true");
                     // do a check of available bytes and possibly sleep some amount of time (then continue).
                     // this way we can break out of run() sanely or we end up blocking indefintely in StreamMessage.deserialize()
                     while (buffers.isEmpty())
                     {
-                        logger.info("JEB::SIH::StreamDeser buffers are empty, buffers = {}", buffers);
                         if (closed)
                             return;
 
@@ -177,8 +172,6 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
                     }
 
                     StreamMessage message = StreamMessage.deserialize(buffers, protocolVersion, null);
-
-                    logger.debug("Received stream message {}", message);
 
                     // keep-alives don't necessarily need to be tied to a session (they could be arrive before or after
                     // wrt session lifecycle, due to races), just log that we received the message and carry on
@@ -227,7 +220,7 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
             }
         }
 
-        StreamSession deriveSession(StreamMessage message) throws IOException
+        StreamSession deriveSession(StreamMessage message)
         {
             StreamSession streamSession = null;
             // StreamInitMessage starts a new channel, and IncomingStreamMessage potentially, as well.

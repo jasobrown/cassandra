@@ -65,9 +65,7 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
 
     public void channelActive(ChannelHandlerContext ctx)
     {
-        // TODO:JEB clean me up if useful - wrt BlockingBufferHandler creating queue in read()
-        if (handlesLargeMessages)
-            ctx.channel().config().setAutoRead(false);
+        bufferHandler.channelActive(ctx);
     }
 
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws IOException
@@ -124,6 +122,11 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
      */
     interface BufferHandler
     {
+        default void channelActive(ChannelHandlerContext ctx)
+        {
+            // nop
+        }
+
         void channelRead(ChannelHandlerContext ctx, ByteBuf in) throws IOException;
 
         void close();
@@ -193,18 +196,6 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
     class BlockingBufferHandler implements BufferHandler
     {
         /**
-         * The default low-water mark to set on {@link #queuedBuffers}.
-         * See {@link RebufferingByteBufDataInputPlus} for more information.
-         */
-        private static final int QUEUE_LOW_WATER_MARK = 1 << 15;
-
-        /**
-         * The default high-water mark to set on {@link #queuedBuffers}.
-         * See {@link RebufferingByteBufDataInputPlus} for more information.
-         */
-        private static final int QUEUE_HIGH_WATER_MARK = 1 << 17;
-
-        /**
          * Default time in milliseconds that {@link #queuedBuffers} should wait for new buffers to arrive.
          * See {@link RebufferingByteBufDataInputPlus} for more information.
          */
@@ -240,19 +231,16 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
             executorService.allowCoreThreadTimeOut(true);
         }
 
+        public void channelActive(ChannelHandlerContext ctx)
+        {
+            queuedBuffers = new RebufferingByteBufDataInputPlus(ctx.channel(), QUEUED_BUFFERS_REBUFFER_MILLIS);
+        }
+
         /**
          * This will execute on the netty event loop
          */
         public void channelRead(ChannelHandlerContext ctx, ByteBuf in)
         {
-            if (queuedBuffers == null)
-            {
-                queuedBuffers = new RebufferingByteBufDataInputPlus(QUEUE_LOW_WATER_MARK,
-                                                                    QUEUE_HIGH_WATER_MARK,
-                                                                    ctx.channel(),
-                                                                    QUEUED_BUFFERS_REBUFFER_MILLIS);
-            }
-
             try
             {
                 queuedBuffers.append(in);

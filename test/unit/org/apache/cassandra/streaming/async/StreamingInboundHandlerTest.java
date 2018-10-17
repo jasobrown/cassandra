@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.streaming.async;
 
-import java.io.IOException;
 import java.util.UUID;
 
 import com.google.common.net.InetAddresses;
@@ -67,7 +66,7 @@ public class StreamingInboundHandlerTest
     {
         handler = new StreamingInboundHandler(REMOTE_ADDR, VERSION, null);
         channel = new EmbeddedChannel(handler);
-        buffers = new RebufferingByteBufDataInputPlus(1 << 9, 1 << 10, channel);
+        buffers = new RebufferingByteBufDataInputPlus(channel);
         handler.setPendingBuffers(buffers);
     }
 
@@ -118,7 +117,7 @@ public class StreamingInboundHandlerTest
     }
 
     @Test
-    public void StreamDeserializingTask_deriveSession_StreamInitMessage() throws IOException
+    public void StreamDeserializingTask_deriveSession_StreamInitMessage()
     {
         StreamInitMessage msg = new StreamInitMessage(REMOTE_ADDR, 0, UUID.randomUUID(), StreamOperation.REPAIR, UUID.randomUUID(), PreviewKind.ALL);
         StreamingInboundHandler.StreamDeserializingTask task = handler.new StreamDeserializingTask(sid -> createSession(sid), null, channel);
@@ -132,7 +131,7 @@ public class StreamingInboundHandlerTest
     }
 
     @Test (expected = IllegalStateException.class)
-    public void StreamDeserializingTask_deriveSession_NoSession() throws InterruptedException, IOException
+    public void StreamDeserializingTask_deriveSession_NoSession()
     {
         CompleteMessage msg = new CompleteMessage();
         StreamingInboundHandler.StreamDeserializingTask task = handler.new StreamDeserializingTask(sid -> createSession(sid), null, channel);
@@ -140,7 +139,7 @@ public class StreamingInboundHandlerTest
     }
 
     @Test (expected = IllegalStateException.class)
-    public void StreamDeserializingTask_deriveSession_IFM_NoSession() throws InterruptedException, IOException
+    public void StreamDeserializingTask_deriveSession_IFM_NoSession()
     {
         StreamMessageHeader header = new StreamMessageHeader(TableId.generate(), REMOTE_ADDR, UUID.randomUUID(),
                                                              0, 0, 0, UUID.randomUUID());
@@ -150,7 +149,7 @@ public class StreamingInboundHandlerTest
     }
 
     @Test
-    public void StreamDeserializingTask_deriveSession_IFM_HasSession() throws InterruptedException, IOException
+    public void StreamDeserializingTask_deriveSession_IFM_HasSession()
     {
         UUID planId = UUID.randomUUID();
         StreamResultFuture future = StreamResultFuture.initReceivingSide(0, planId, StreamOperation.REPAIR, REMOTE_ADDR, channel, UUID.randomUUID(), PreviewKind.ALL);

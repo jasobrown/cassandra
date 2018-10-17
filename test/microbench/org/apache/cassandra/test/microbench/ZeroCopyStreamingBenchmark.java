@@ -241,7 +241,7 @@ public class ZeroCopyStreamingBenchmark
     public void blockStreamReader(BenchmarkState state) throws Exception
     {
         EmbeddedChannel channel = createMockNettyChannel();
-        RebufferingByteBufDataInputPlus in = new RebufferingByteBufDataInputPlus(STREAM_SIZE, STREAM_SIZE, channel);
+        RebufferingByteBufDataInputPlus in = new RebufferingByteBufDataInputPlus(channel);
         in.append(state.serializedBlockStream.retainedDuplicate());
         SSTableMultiWriter sstableWriter = state.blockStreamReader.read(in);
         Collection<SSTableReader> newSstables = sstableWriter.finished();
@@ -265,7 +265,7 @@ public class ZeroCopyStreamingBenchmark
     public void partialStreamReader(BenchmarkState state) throws Exception
     {
         EmbeddedChannel channel = createMockNettyChannel();
-        RebufferingByteBufDataInputPlus in = new RebufferingByteBufDataInputPlus(STREAM_SIZE, STREAM_SIZE, channel);
+        RebufferingByteBufDataInputPlus in = new RebufferingByteBufDataInputPlus(channel);
         in.append(state.serializedPartialStream.retainedDuplicate());
         SSTableMultiWriter sstableWriter = state.partialStreamReader.read(in);
         Collection<SSTableReader> newSstables = sstableWriter.finished();

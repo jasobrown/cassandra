@@ -57,25 +57,21 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
 
     private volatile boolean closed;
 
-    public RebufferingByteBufDataInputPlus(int lowWaterMark, int highWaterMark, Channel channel)
+    public RebufferingByteBufDataInputPlus(Channel channel)
     {
-        this (lowWaterMark, highWaterMark, channel, DEFAULT_REBUFFER_BLOCK_IN_MILLIS);
+        this (channel, DEFAULT_REBUFFER_BLOCK_IN_MILLIS);
     }
 
-    public RebufferingByteBufDataInputPlus(int lowWaterMark, int highWaterMark, Channel channel, long rebufferBlockInMillis)
+    public RebufferingByteBufDataInputPlus(Channel channel, long rebufferBlockInMillis)
     {
-        // TODO:JEB clean me up if useful
-
         super(Unpooled.EMPTY_BUFFER.nioBuffer());
-
-        if (lowWaterMark > highWaterMark)
-            throw new IllegalArgumentException(String.format("low water mark is greater than high water mark: %d vs %d", lowWaterMark, highWaterMark));
 
         currentBuf = Unpooled.EMPTY_BUFFER;
         this.rebufferBlockInMillis = rebufferBlockInMillis;
         queue = new LinkedBlockingQueue<>();
 
         this.channel = channel;
+        channel.config().setAutoRead(false);
     }
 
     /**
@@ -127,7 +123,6 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
 
             buffer = currentBuf.nioBuffer(currentBuf.readerIndex(), bytes);
             assert buffer.remaining() == bytes;
-//            queuedByteCount.addAndGet(-bytes);
         }
         catch (InterruptedException ie)
         {

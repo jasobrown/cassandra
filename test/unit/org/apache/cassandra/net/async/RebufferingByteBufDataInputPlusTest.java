@@ -36,9 +36,6 @@ import org.apache.cassandra.io.util.BufferedDataOutputStreamPlus;
 
 public class RebufferingByteBufDataInputPlusTest
 {
-    private static final int LOW_WATER_MARK = 1 << 10;
-    private static final int HIGH_WATER_MARK = 1 << 11;
-
     private EmbeddedChannel channel;
     private RebufferingByteBufDataInputPlus inputPlus;
     private ByteBuf buf;
@@ -47,7 +44,7 @@ public class RebufferingByteBufDataInputPlusTest
     public void setUp()
     {
         channel = new EmbeddedChannel();
-        inputPlus = new RebufferingByteBufDataInputPlus(LOW_WATER_MARK, HIGH_WATER_MARK, channel);
+        inputPlus = new RebufferingByteBufDataInputPlus(channel);
     }
 
     @After
@@ -58,12 +55,6 @@ public class RebufferingByteBufDataInputPlusTest
 
         if (buf != null && buf.refCnt() > 0)
             buf.release(buf.refCnt());
-    }
-
-    @Test (expected = IllegalArgumentException.class)
-    public void ctor_badWaterMarks()
-    {
-        inputPlus = new RebufferingByteBufDataInputPlus(2, 1, null);
     }
 
     @Test
@@ -258,7 +249,7 @@ public class RebufferingByteBufDataInputPlusTest
     public void rebufferTimeout() throws IOException
     {
         long timeoutMillis = 1000;
-        inputPlus = new RebufferingByteBufDataInputPlus(10, 20, channel, timeoutMillis);
+        inputPlus = new RebufferingByteBufDataInputPlus(channel, timeoutMillis);
 
         long startNanos = System.nanoTime();
         try
