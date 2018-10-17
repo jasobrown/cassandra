@@ -84,9 +84,9 @@ public class StreamingInboundHandlerTest
     }
 
     @Test
-    public void channelRead_Normal() throws IOException
+    public void channelRead_Normal()
     {
-        Assert.assertEquals(0, buffers.available());
+        Assert.assertEquals(0, buffers.unsafeAvailable());
         int size = 8;
         buf = channel.alloc().buffer(size);
         buf.writerIndex(size);
@@ -96,7 +96,7 @@ public class StreamingInboundHandlerTest
     }
 
     @Test
-    public void channelRead_Closed() throws IOException
+    public void channelRead_Closed()
     {
         int size = 8;
         buf = channel.alloc().buffer(size);
@@ -104,16 +104,16 @@ public class StreamingInboundHandlerTest
         buf.writerIndex(size);
         handler.close();
         channel.writeInbound(buf);
-        Assert.assertEquals(0, buffers.available());
+        Assert.assertEquals(0, buffers.unsafeAvailable());
         Assert.assertEquals(0, buf.refCnt());
         Assert.assertFalse(channel.releaseInbound());
     }
 
     @Test
-    public void channelRead_WrongObject() throws IOException
+    public void channelRead_WrongObject()
     {
         channel.writeInbound("homer");
-        Assert.assertEquals(0, buffers.available());
+        Assert.assertEquals(0, buffers.unsafeAvailable());
         Assert.assertFalse(channel.releaseInbound());
     }
 

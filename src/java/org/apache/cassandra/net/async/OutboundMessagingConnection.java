@@ -262,7 +262,10 @@ public class OutboundMessagingConnection
         if (connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE)
         {
             String threadName = "MessagingService-NettyOutbound-" + connectionId.remote().toString() + "-LargeMessages";
-            consumerTaskThread = new ScheduledThreadPoolExecutor(1, new NamedThreadFactory(threadName));
+            ScheduledThreadPoolExecutor scheduledThreadPoolExecutor = new ScheduledThreadPoolExecutor(1, new NamedThreadFactory(threadName));
+            scheduledThreadPoolExecutor.setRejectedExecutionHandler((r, executor) -> {});
+            consumerTaskThread = scheduledThreadPoolExecutor;
+
         }
         else
         {
