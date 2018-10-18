@@ -603,6 +603,7 @@ public class OutboundMessagingConnection
 
         void sendDequeuedMessage(QueuedMessage message)
         {
+            logger.info("{} JEB::OMC::LMD sending large message of size = {}", loggingTag(), message.message.serializedSize(targetVersion));
             try
             {
                 // as the promises for each of the chunks (via ByteBufDataOutputStreamPlus) will be fulfilled on the event loop,
@@ -753,6 +754,8 @@ public class OutboundMessagingConnection
         }
 
         JVMStabilityInspector.inspectThrowable(cause);
+
+        logger.error("{} JEB::OMC Unexpected error writing", loggingTag(), cause);
 
         if (cause instanceof IOException || (cause.getCause() != null && cause.getCause() instanceof IOException))
         {
@@ -1025,9 +1028,10 @@ public class OutboundMessagingConnection
 
     private MessageDequeuer deriveMessageDequeuer(OutboundConnectionIdentifier connectionId, Channel channel)
     {
-        return connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE
-               ? new LargeMessageDequeuer(channel)
-               : new SimpleMessageDequeuer();
+        return new SimpleMessageDequeuer();
+//        return connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE
+//               ? new LargeMessageDequeuer(channel)
+//               : new SimpleMessageDequeuer();
     }
 
     /**

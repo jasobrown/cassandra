@@ -58,9 +58,10 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
     {
         this.peer = peer;
 
-        bufferHandler = handlesLargeMessages
-                        ? new BlockingBufferHandler(channel, messageProcessor)
-                        : new NonblockingBufferHandler(messageProcessor);
+        bufferHandler = new NonblockingBufferHandler(messageProcessor);
+//        bufferHandler = handlesLargeMessages
+//                        ? new BlockingBufferHandler(channel, messageProcessor)
+//                        : new NonblockingBufferHandler(messageProcessor);
     }
 
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws IOException
@@ -78,13 +79,13 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
 
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
     {
-        if (cause instanceof EOFException || (cause.getCause() != null && cause.getCause() instanceof EOFException))
-            logger.trace("eof reading from socket; closing", cause);
-        else if (cause instanceof UnknownTableException)
-            logger.warn("Got message from unknown table while reading from socket; closing", cause);
-        else if (cause instanceof IOException || cause instanceof IOError)
-            logger.trace("IOException reading from socket; closing", cause);
-        else
+//        if (cause instanceof EOFException || (cause.getCause() != null && cause.getCause() instanceof EOFException))
+//            logger.trace("eof reading from socket; closing", cause);
+//        else if (cause instanceof UnknownTableException)
+//            logger.warn("Got message from unknown table while reading from socket; closing", cause);
+//        else if (cause instanceof IOException || cause instanceof IOError)
+//            logger.trace("IOException reading from socket; closing", cause);
+//        else
             logger.warn("Unexpected exception caught in inbound channel pipeline from " + ctx.channel().remoteAddress(), cause);
 
         close();
