@@ -38,6 +38,7 @@ import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.FastThreadLocalThread;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.async.RebufferingByteBufDataInputPlus;
+import org.apache.cassandra.net.async.RebufferingByteBufDataInputPlus.InputTimeoutException;
 import org.apache.cassandra.streaming.StreamManager;
 import org.apache.cassandra.streaming.StreamReceiveException;
 import org.apache.cassandra.streaming.StreamResultFuture;
@@ -161,6 +162,10 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
             {
                 while (true)
                 {
+                    // TODO:JEB doc me, maybe move this check into RBBDIS?
+                    if (buffers.isEmpty())
+                        channel.read();
+
                     // do a check of available bytes and possibly sleep some amount of time (then continue).
                     // this way we can break out of run() sanely or we end up blocking indefintely in StreamMessage.deserialize()
                     while (buffers.isEmpty())
@@ -187,10 +192,11 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
 
                     if (logger.isDebugEnabled())
                         logger.debug("{} Received {}", createLogTag(session, channel), message);
+
                     session.messageReceived(message);
                 }
             }
-            catch (EOFException eof)
+            catch (InputTimeoutException | EOFException e)
             {
                 // ignore
             }

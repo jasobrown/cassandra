@@ -40,6 +40,7 @@ import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.exceptions.UnknownTableException;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessageIn.MessageInProcessor;
+import org.apache.cassandra.net.async.RebufferingByteBufDataInputPlus.InputTimeoutException;
 
 /**
  * Parses incoming messages as per the 4.0 internode messaging protocol.
@@ -219,10 +220,7 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
             executorService = new ThreadPoolExecutor(1, 1, 5L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(3),
                                                      new NamedThreadFactory(threadName), nopHandler);
             executorService.allowCoreThreadTimeOut(true);
-        }
-
-        public void channelActive(ChannelHandlerContext ctx)
-        {
+            executorService.setRejectedExecutionHandler((r, executor) -> {});
         }
 
         /**
@@ -259,10 +257,17 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
          */
         private void processInBackground(ChannelHandlerContext ctx)
         {
+            if (closed)
+                return;
+
             try
             {
                 // this will block until the either the channel is closed or there is no incoming data.
                 messageProcessor.process(queuedBuffers);
+            }
+            catch (InputTimeoutException ite)
+            {
+                //nop - nothing to see here
             }
             catch (Throwable cause)
             {

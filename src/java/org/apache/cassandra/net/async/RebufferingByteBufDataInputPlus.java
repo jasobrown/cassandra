@@ -72,6 +72,9 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
 
         this.channel = channel;
         channel.config().setAutoRead(false);
+
+        // TODO:JEB doc me
+        channel.read();
     }
 
     /**
@@ -99,30 +102,37 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
      * <p>
      * This is best, and more or less expected, to be invoked on a consuming thread (not the event loop)
      * becasue if we block on the queue we can't fill it on the event loop (as that's where the buffers are coming from).
+     *
+     * @throws EOFException when no further reading from this instance should occur. Implies this instance is closed.
+     * @throws InputTimeoutException when no new buffers arrive for reading before
+     * the {@link #rebufferBlockInMillis} elapses while blocking. Implies this instance can still be used.
      */
     @Override
-    protected void reBuffer() throws IOException
+    protected void reBuffer() throws EOFException, InputTimeoutException
     {
-        currentBuf.release();
-        buffer = null;
-        currentBuf = null;
-
         if (queue.isEmpty())
             channel.read();
 
         try
         {
-            currentBuf = queue.poll(rebufferBlockInMillis, TimeUnit.MILLISECONDS);
-            int bytes;
+            ByteBuf next = queue.poll(rebufferBlockInMillis, TimeUnit.MILLISECONDS);
             // if we get an explicitly empty buffer, we treat that as an indicator that the input is closed
-            if (currentBuf == null || (bytes = currentBuf.readableBytes()) == 0)
+            int bytes;
+            if (next == null)
+            {
+                throw new InputTimeoutException();
+            }
+            else if ((bytes = next.readableBytes()) == 0)
             {
                 releaseResources();
                 throw new EOFException();
             }
 
-            buffer = currentBuf.nioBuffer(currentBuf.readerIndex(), bytes);
-            assert buffer.remaining() == bytes;
+            // delay releasing the buffers in case a InputTimeoutException is thrown.
+            // we need to be be able to try reading again
+            currentBuf.release();
+            currentBuf = next;
+            buffer = next.nioBuffer(currentBuf.readerIndex(), bytes);
         }
         catch (InterruptedException ie)
         {
@@ -280,4 +290,7 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
 
         return copied;
     }
+
+    public static class InputTimeoutException extends IOException
+    { }
 }

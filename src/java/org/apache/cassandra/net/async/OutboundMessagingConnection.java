@@ -315,9 +315,6 @@ public class OutboundMessagingConnection
             return false;
         }
 
-        if (connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE)
-            logger.info("{} JEB::OMC::sendMessage enqueuing a large message: {}", loggingTag(), queuedMessage);
-
         backlog.offer(queuedMessage);
 
         // only schedule from a producer thread if the backlog was zero before this thread incremented it
@@ -536,7 +533,7 @@ public class OutboundMessagingConnection
                 // if we allocated to little buffer space, we would have hit an exception when trying to write more bytes to it
                 if (buf.isWritable())
                     noSpamLogger.warn("{} reported messages size {}, actual messages size {}",
-                                      connectionId, buf.capacity(), buf.writerIndex());
+                                      loggingTag(), buf.capacity(), buf.writerIndex());
 
                 channel.writeAndFlush(buf)
                        .addListener(OutboundMessagingConnection.this::handleMessageResult);

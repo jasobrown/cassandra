@@ -33,6 +33,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.io.util.BufferedDataOutputStreamPlus;
+import org.apache.cassandra.net.async.RebufferingByteBufDataInputPlus.InputTimeoutException;
 
 public class RebufferingByteBufDataInputPlusTest
 {
@@ -257,7 +258,7 @@ public class RebufferingByteBufDataInputPlusTest
             inputPlus.readInt();
             Assert.fail("should not have been able to read from the queue");
         }
-        catch (EOFException eof)
+        catch (InputTimeoutException e)
         {
             // this is the success case, and is expected. any other exception is a failure.
         }
@@ -265,47 +266,4 @@ public class RebufferingByteBufDataInputPlusTest
         long durationNanos = System.nanoTime() - startNanos;
         Assert.assertTrue(TimeUnit.MILLISECONDS.toNanos(timeoutMillis) <= durationNanos);
     }
-
-//    @Test
-//    public void maybeEnableAutoRead_AlreadyEnabled() throws EOFException
-//    {
-//        channel.config().setAutoRead(true);
-//        Assert.assertTrue(inputPlus.maybeEnableAutoRead());
-//    }
-//
-//    @Test (expected = EOFException.class)
-//    public void maybeEnableAutoRead_Closed() throws EOFException
-//    {
-//        inputPlus.close();
-//        inputPlus.maybeEnableAutoRead();
-//    }
-//
-//    @Test
-//    public void maybeEnableAutoRead_NoBytes() throws EOFException
-//    {
-//        channel.config().setAutoRead(false);
-//        Assert.assertTrue(inputPlus.maybeEnableAutoRead());
-//    }
-//
-//    @Test
-//    public void maybeEnableAutoRead_EnoughBytes() throws EOFException
-//    {
-//        buf = channel.alloc().buffer(LOW_WATER_MARK - 1);
-//        buf.writerIndex(buf.capacity());
-//        inputPlus.append(buf);
-//        Assert.assertEquals(buf.writerIndex(), inputPlus.available());
-//        channel.config().setAutoRead(false);
-//        Assert.assertTrue(inputPlus.maybeEnableAutoRead());
-//    }
-//
-//    @Test
-//    public void maybeEnableAutoRead_TooManyBytes() throws EOFException
-//    {
-//        buf = channel.alloc().buffer(HIGH_WATER_MARK + 1);
-//        buf.writerIndex(buf.capacity());
-//        inputPlus.append(buf);
-//        Assert.assertEquals(buf.writerIndex(), inputPlus.available());
-//        channel.config().setAutoRead(false);
-//        Assert.assertFalse(inputPlus.maybeEnableAutoRead());
-//    }
 }
