@@ -581,7 +581,6 @@ public class OutboundMessagingConnection
          */
         public boolean dequeueMessages()
         {
-            logger.info("{} JEB::OMC::LMD HEAD", loggingTag());
             final long timestampNanos = System.nanoTime();
             int dequeuedMessages = 0;
             int sendMessageCount = 0;
@@ -589,7 +588,6 @@ public class OutboundMessagingConnection
             QueuedMessage next;
             while (!closed && (next = backlog.poll()) != null)
             {
-                logger.info("{} JEB::OMC::LMD next large msg = {}", loggingTag(), next);
                 dequeuedMessages++;
                 if (!next.isTimedOut(timestampNanos))
                 {
@@ -607,9 +605,7 @@ public class OutboundMessagingConnection
             try
             {
                 promiseCombiner = new PromiseCombiner();
-                logger.info("{} JEB::OMC::LMD sending large msg = {}", loggingTag(), message);
                 message.message.serialize(output, targetVersion, connectionId, message.id, message.timestampNanos);
-                logger.info("{} JEB::OMC::LMD finished sending large msg = {}", loggingTag(), message);
                 output.flush();
 
                 // as the promises for each of the chunks (via ByteBufDataOutputStreamPlus) will be fulfilled on the event loop,
@@ -683,8 +679,6 @@ public class OutboundMessagingConnection
 
         // checking the cause() is an optimized way to tell if the operation was successful (as the cause will be null)
         Throwable cause = future.cause();
-        if (connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE)
-            logger.info("{} JEB::OMC::handleMessageResult promise was fulfilled for a marge message , cause = {}", loggingTag(), cause);
         if (cause == null)
         {
             // explicitly check if the backlog queue is empty as we haven't necessarily decremented the backlogSize
