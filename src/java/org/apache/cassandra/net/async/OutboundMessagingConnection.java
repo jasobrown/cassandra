@@ -19,6 +19,7 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -46,6 +47,7 @@ import io.netty.channel.EventLoop;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.concurrent.PromiseCombiner;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
@@ -557,10 +559,9 @@ public class OutboundMessagingConnection
          * Reatin a local reference to the channel to avoid any visibilty issues with the parent class's {@link #channel}.
          */
         private final Channel channel;
-
-        private PromiseCombiner promiseCombiner;
-
         private final DataOutputStreamPlus output;
+
+        private LargeMessagePromiseAggregator promiseAggregator;
 
         LargeMessageDequeuer(Channel channel)
         {
@@ -604,15 +605,17 @@ public class OutboundMessagingConnection
         {
             try
             {
-                promiseCombiner = new PromiseCombiner();
+                // as the promises for each of the chunks (via ByteBufDataOutputStreamPlus) will be fulfilled on the event loop,
+                // handleMessageResult will also be handled on the event loop (which is what we want). thus no need to
+                // schedule fulfilling the final promise to a different thread.
+                ChannelPromise finalPromise = channel.newPromise();
+                finalPromise.addListener(OutboundMessagingConnection.this::handleMessageResult);
+                promiseAggregator = new LargeMessagePromiseAggregator(finalPromise);
+
                 message.message.serialize(output, targetVersion, connectionId, message.id, message.timestampNanos);
                 output.flush();
 
-                // as the promises for each of the chunks (via ByteBufDataOutputStreamPlus) will be fulfilled on the event loop,
-                // handleMessageResult will also be handled on the event loop (which is what we want). thus no need to schedule to a different thread.
-                ChannelPromise finalPromise = channel.newPromise();
-                finalPromise.addListener(OutboundMessagingConnection.this::handleMessageResult);
-                promiseCombiner.finish(finalPromise);
+                promiseAggregator.finish();
             }
             catch (Throwable t)
             {
@@ -622,7 +625,7 @@ public class OutboundMessagingConnection
             }
             finally
             {
-                promiseCombiner = null;
+                promiseAggregator = null;
             }
         }
 
@@ -631,9 +634,9 @@ public class OutboundMessagingConnection
          *
          * Note: called on the same thread as {@link #sendDequeuedMessage(QueuedMessage)}.
          */
-        void handleFuture(Future promise)
+        void handleFuture(ChannelPromise promise)
         {
-            promiseCombiner.add(promise);
+            promiseAggregator.add(promise);
         }
 
         /**
@@ -664,6 +667,62 @@ public class OutboundMessagingConnection
                     logger.debug("failed to close an output strezm for sending large messages, ignoring as we are closing", e);
             }
         }
+
+        // TODO:JEB doc me
+        private class LargeMessagePromiseAggregator
+        {
+            // will be fulfilled on the event loop
+            private final ChannelPromise aggregatePromise;
+
+            // only set on the OMC.consumerTaskThread (a/k/a the large messages thread)
+            private volatile boolean doneAdding;
+
+            // only incrememnted on the OMC.consumerTaskThread (a/k/a the large messages thread)
+            private volatile int expectedCount;
+
+            // only incremented on event loop
+            private volatile int completedCount;
+
+            // only set on the event loop
+            private volatile Throwable cause;
+
+            private LargeMessagePromiseAggregator(ChannelPromise aggregatePromise)
+            {
+                this.aggregatePromise = aggregatePromise;
+            }
+
+            void add(ChannelPromise promise)
+            {
+                expectedCount++;
+                promise.addListener(this::promiseComplete);
+            }
+
+            private void promiseComplete(Future<?> future)
+            {
+                completedCount++;
+
+                if (!future.isSuccess())
+                    cause = future.cause();
+
+                if (completedCount == expectedCount && doneAdding)
+                    tryPromise();
+            }
+
+            void finish()
+            {
+                doneAdding = true;
+                if (expectedCount == completedCount)
+                    tryPromise();
+            }
+
+            private void tryPromise()
+            {
+                if (cause == null)
+                    aggregatePromise.trySuccess(null);
+                else
+                    aggregatePromise.tryFailure(cause);
+            }
+        }
     }
     /**
      * Handles the result of sending each message. This function will be invoked when all of the bytes of the message have
@@ -675,7 +734,6 @@ public class OutboundMessagingConnection
     {
         if (closed)
             return;
-
 
         // checking the cause() is an optimized way to tell if the operation was successful (as the cause will be null)
         Throwable cause = future.cause();

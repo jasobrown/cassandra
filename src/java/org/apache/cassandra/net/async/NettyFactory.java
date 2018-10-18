@@ -305,8 +305,9 @@ public final class NettyFactory
     @VisibleForTesting
     public Bootstrap createOutboundBootstrap(OutboundConnectionParams params)
     {
-        logger.debug("creating outbound bootstrap to peer {}, compression: {}, encryption: {}, coalesce: {}, protocolVersion: {}",
+        logger.debug("creating outbound bootstrap to peer {}, connection type = {}, compression: {}, encryption: {}, coalesce: {}, protocolVersion: {}",
                      params.connectionId.connectionAddress(),
+                     params.connectionId.type(),
                      params.compress, encryptionLogStatement(params.encryptionOptions),
                      params.coalescingStrategy != null ? params.coalescingStrategy : CoalescingStrategies.Strategy.DISABLED,
                      params.protocolVersion);

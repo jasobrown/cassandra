@@ -40,7 +40,9 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelProgressiveFuture;
 import io.netty.channel.ChannelProgressiveFutureListener;
 import io.netty.channel.ChannelProgressivePromise;
+import io.netty.channel.ChannelPromise;
 import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 import org.apache.cassandra.io.util.BufferedDataOutputStreamPlus;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.io.util.FileUtils;
@@ -75,7 +77,7 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
      * when writing an object to the {@link #channel}. Useful if the caller needs to know the success of each
      * buffer written to the channel.
      */
-    private final Consumer<Future> futureConsumer;
+    private final Consumer<ChannelPromise> futureConsumer;
 
     /**
      * This *must* be the owning {@link ByteBuf} for the {@link BufferedDataOutputStreamPlus#buffer}
@@ -83,7 +85,7 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
     private ByteBuf currentBuf;
 
     private ByteBufDataOutputStreamPlus(Channel channel, ByteBuf buffer, int bufferSize, Consumer<Throwable> errorHandler,
-                                        int rateLimiterBlockTime, TimeUnit rateLimiterBlockTimeUnit, Consumer<Future> futureConsumer)
+                                        int rateLimiterBlockTime, TimeUnit rateLimiterBlockTimeUnit, Consumer<ChannelPromise> futureConsumer)
     {
         super(buffer.nioBuffer(0, bufferSize));
         this.channel = channel;
@@ -131,7 +133,7 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
     }
 
     public static ByteBufDataOutputStreamPlus create(Channel channel, int bufferSize, Consumer<Throwable> errorHandler,
-                                                     int rateLimiterBlockTime, TimeUnit timeUnit, Consumer<Future> futureConsumer)
+                                                     int rateLimiterBlockTime, TimeUnit timeUnit, Consumer<ChannelPromise> futureConsumer)
     {
         ByteBuf buf = channel.alloc().directBuffer(bufferSize, bufferSize);
         return new ByteBufDataOutputStreamPlus(channel, buf, bufferSize, errorHandler, rateLimiterBlockTime, timeUnit, futureConsumer);
@@ -140,7 +142,7 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
     /**
      * Writes the incoming buffer directly to the backing {@link #channel}, without copying to the intermediate {@link #buffer}.
      */
-    public ChannelFuture writeToChannel(ByteBuf buf) throws IOException
+    public ChannelPromise writeToChannel(ByteBuf buf) throws IOException
     {
         doFlush(buffer.position());
 
@@ -150,10 +152,11 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
             throw new IOException(String.format("outbound channel was not writable. Failed to acquire sufficient permits %d", byteCount));
 
         // the (possibly naive) assumption that we should always flush after each incoming buf
-        ChannelFuture channelFuture = channel.writeAndFlush(buf);
-        channelFuture.addListener(future -> handleBuffer(future, byteCount));
-        futureConsumer.accept(channelFuture);
-        return channelFuture;
+        ChannelPromise promise = channel.newPromise();
+        channel.writeAndFlush(buf, promise);
+        promise.addListener(future -> handleBuffer(future, byteCount));
+        futureConsumer.accept(promise);
+        return promise;
     }
 
     /**
@@ -196,14 +199,15 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
                 bytesTransferred += toRead;
                 final boolean shouldClose = (bytesTransferred == length); // this is the last buffer, can safely close channel
 
-                ChannelFuture channelFuture = channel.writeAndFlush(fileRegion);
-                channelFuture.addListener(future -> {
+                ChannelPromise promise = channel.newPromise();
+                channel.writeAndFlush(fileRegion, promise);
+                promise.addListener(future -> {
                     handleBuffer(future, toRead);
 
                     if ((shouldClose || !future.isSuccess()) && f.isOpen())
                         f.close();
                 });
-                futureConsumer.accept(channelFuture);
+                futureConsumer.accept(promise);
                 logger.trace("{} of {} (toRead {} cs {})", bytesTransferred, length, toRead, f.isOpen());
             }
 
