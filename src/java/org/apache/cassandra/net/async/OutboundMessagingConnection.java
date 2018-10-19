@@ -214,12 +214,12 @@ public class OutboundMessagingConnection
 
     /**
      * The netty channel, once a socket connection is established; it won't be in it's normal working state until the
-     * handshake is complete. Should only be referenced on the {@link #eventLoop}.
+     * handshake is complete. Should only be referenced on the {@link #consumerTaskThread}.
      */
     private Channel channel;
 
     /**
-     * Responsible for pulling messages off the {@link #backlog}. Should only be referenced on the {@link #eventLoop}.
+     * Responsible for pulling messages off the {@link #backlog}. Should only be referenced on the {@link #consumerTaskThread}.
      */
     private MessageDequeuer messageDequeuer;
 
@@ -598,31 +598,31 @@ public class OutboundMessagingConnection
             }
 
             updateCountersAfterDequeue(dequeuedMessages, sendMessageCount);
+
+            // TODO:JEB do I need to reschedule here? like SmallMessageDequeuer
+
             return sendMessageCount > 0;
         }
 
         void sendDequeuedMessage(QueuedMessage message)
         {
             logger.info("{} JEB::OMC::LMD sending large message of size = {}", loggingTag(), message.message.serializedSize(targetVersion));
+            ChannelPromise finalPromise = channel.newPromise();
+            // even though the promises for each of the chunks (via ByteBufDataOutputStreamPlus) will be fulfilled on the event loop,
+            // when a failure occurs on *this* thread, we must ensure the handleMessageResult will also be executed on the event loop.
+            // hence, we schedule it to the appropriate thread
+            finalPromise.addListener(future -> eventLoop.submit(() -> handleMessageResult(future)));
+            promiseAggregator = new LargeMessagePromiseAggregator(finalPromise);
+
             try
             {
-                // as the promises for each of the chunks (via ByteBufDataOutputStreamPlus) will be fulfilled on the event loop,
-                // handleMessageResult will also be handled on the event loop (which is what we want). thus no need to
-                // schedule fulfilling the final promise to a different thread.
-                ChannelPromise finalPromise = channel.newPromise();
-                finalPromise.addListener(OutboundMessagingConnection.this::handleMessageResult);
-                promiseAggregator = new LargeMessagePromiseAggregator(finalPromise);
-
                 message.message.serialize(output, targetVersion, connectionId, message.id, message.timestampNanos);
                 output.flush();
-
                 promiseAggregator.finish();
             }
             catch (Throwable t)
             {
-                ChannelPromise promise = channel.newPromise();
-                promise.tryFailure(new IOException(t));
-                eventLoop.submit(() -> handleMessageResult(promise));
+                finalPromise.tryFailure(new IOException(t));
             }
             finally
             {

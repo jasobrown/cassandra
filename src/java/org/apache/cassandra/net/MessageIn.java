@@ -540,16 +540,7 @@ public class MessageIn<T>
                                                              messageHeader.messageId, messageHeader.constructionTime, messageHeader.from,
                                                              messageHeader.payloadSize, messageHeader.verb, messageHeader.parameters);
                 if (messageIn != null)
-                {
-                    try
-                    {
-                        messageConsumer.accept(messageIn, messageHeader.messageId);
-                    }
-                    catch (Throwable t)
-                    {
-                        throw t;
-                    }
-                }
+                    messageConsumer.accept(messageIn, messageHeader.messageId);
             }
         }
     }

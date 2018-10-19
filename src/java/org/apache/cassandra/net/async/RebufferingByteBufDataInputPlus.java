@@ -116,7 +116,6 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
         try
         {
             ByteBuf next = queue.poll(rebufferBlockInMillis, TimeUnit.MILLISECONDS);
-            // if we get an explicitly empty buffer, we treat that as an indicator that the input is closed
             int bytes;
             if (next == null)
             {
@@ -124,6 +123,7 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
             }
             else if ((bytes = next.readableBytes()) == 0)
             {
+                // if we get an explicitly empty buffer, we treat that as an indicator that the input is closed
                 releaseResources();
                 throw new EOFException();
             }

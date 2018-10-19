@@ -248,24 +248,10 @@ public class ByteBufDataOutputStreamPlus extends BufferedDataOutputStreamPlus
                 // TODO:JEB not sure this is right or desirable
                 throw new IOException(String.format("outbound channel was not writable. Failed to acquire sufficient permits %d", byteCount));
             }
-            ChannelProgressivePromise promise = channel.newProgressivePromise();
-            promise.addListener(new ChannelProgressiveFutureListener()
-            {
-                public void operationProgressed(ChannelProgressiveFuture future, long progress, long total)
-                {
-                    channelRateLimiter.release(Ints.checkedCast(progress));
-                }
 
-                public void operationComplete(ChannelProgressiveFuture future)
-                {
-                    if (!future.isSuccess() && channel.isOpen())
-                        errorHandler.accept(future.cause());
-                }
-            });
-
-
+            ChannelPromise promise = channel.newPromise();
             channel.writeAndFlush(currentBuf, promise);
-//            promise.addListener(future -> handleBuffer(future, byteCount));
+            promise.addListener(future -> handleBuffer(future, byteCount));
             futureConsumer.accept(promise);
             currentBuf = channel.alloc().directBuffer(bufferSize, bufferSize);
             buffer = currentBuf.nioBuffer(0, bufferSize);
