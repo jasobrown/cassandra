@@ -1028,10 +1028,9 @@ public class OutboundMessagingConnection
 
     private MessageDequeuer deriveMessageDequeuer(OutboundConnectionIdentifier connectionId, Channel channel)
     {
-        return new SimpleMessageDequeuer();
-//        return connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE
-//               ? new LargeMessageDequeuer(channel)
-//               : new SimpleMessageDequeuer();
+        return connectionId.type() == OutboundConnectionIdentifier.ConnectionType.LARGE_MESSAGE
+               ? new LargeMessageDequeuer(channel)
+               : new SimpleMessageDequeuer();
     }
 
     /**

@@ -58,10 +58,9 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
     {
         this.peer = peer;
 
-        bufferHandler = new NonblockingBufferHandler(messageProcessor);
-//        bufferHandler = handlesLargeMessages
-//                        ? new BlockingBufferHandler(channel, messageProcessor)
-//                        : new NonblockingBufferHandler(messageProcessor);
+        bufferHandler = handlesLargeMessages
+                        ? new BlockingBufferHandler(channel, messageProcessor)
+                        : new NonblockingBufferHandler(messageProcessor);
     }
 
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws IOException
@@ -266,7 +265,7 @@ public class MessageInHandler extends ChannelInboundHandlerAdapter
                 // this will block until the either the channel is closed or there is no incoming data.
                 messageProcessor.process(queuedBuffers);
             }
-            catch (InputTimeoutException ite)
+            catch (InputTimeoutException | EOFException e)
             {
                 //nop - nothing to see here
             }
