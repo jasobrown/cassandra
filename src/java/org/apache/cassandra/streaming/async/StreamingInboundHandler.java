@@ -162,9 +162,7 @@ public class StreamingInboundHandler extends ChannelInboundHandlerAdapter
             {
                 while (true)
                 {
-                    // TODO:JEB doc me, maybe move this check into RBBDIS?
-                    if (buffers.isEmpty())
-                        channel.read();
+                    buffers.maybeIssueRead();
 
                     // do a check of available bytes and possibly sleep some amount of time (then continue).
                     // this way we can break out of run() sanely or we end up blocking indefintely in StreamMessage.deserialize()

@@ -43,7 +43,6 @@ import org.apache.cassandra.io.util.TrackedDataInputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessagingService.Verb;
 import org.apache.cassandra.net.async.ByteBufDataInputPlus;
-import org.apache.cassandra.net.async.MessageInHandler;
 import org.apache.cassandra.net.async.RebufferingByteBufDataInputPlus;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.vint.VIntCoding;
@@ -524,8 +523,7 @@ public class MessageIn<T>
 
         public void process(RebufferingByteBufDataInputPlus in) throws IOException
         {
-            // TODO:JEB check me out
-            while (in.isOpen())// && !in.isEmpty())
+            while (in.isOpen())
             {
                 readPrefix(in);
                 messageHeader.from = peer;
@@ -671,8 +669,7 @@ public class MessageIn<T>
 
         public void process(RebufferingByteBufDataInputPlus in) throws IOException
         {
-            // TODO:JEB check me out
-            while (in.isOpen())// && !in.isEmpty())
+            while (in.isOpen())
             {
                 readPrefix(in);
                 messageHeader.from = CompactEndpointSerializationHelper.instance.deserialize(in, messagingVersion);

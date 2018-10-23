@@ -181,6 +181,14 @@ public class RebufferingByteBufDataInputPlus extends RebufferingInputStream impl
         return Ints.checkedCast(count);
     }
 
+    // TODO:JEB add docs
+    // TL;DR if there's no Bufs open anywhere here, issue a channle read to try and grab data.
+    public void maybeIssueRead()
+    {
+        if (isEmpty())
+            channel.read();
+    }
+
     public boolean isEmpty()
     {
         return queue.isEmpty() && buffer.remaining() == 0;

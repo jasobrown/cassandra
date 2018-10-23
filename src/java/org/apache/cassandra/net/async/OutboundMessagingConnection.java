@@ -494,7 +494,6 @@ public class OutboundMessagingConnection
             catch (Throwable e)
             {
                 logger.error("{} an error occurred while trying dequeue and process messages", loggingTag(), e);
-                // TODO:JEB not sure if we want to close the channel or take other action
                 errorOccurred = true;
             }
             finally
@@ -606,7 +605,6 @@ public class OutboundMessagingConnection
 
         void sendDequeuedMessage(QueuedMessage message)
         {
-            logger.info("{} JEB::OMC::LMD sending large message of size = {}", loggingTag(), message.message.serializedSize(targetVersion));
             ChannelPromise finalPromise = channel.newPromise();
             // even though the promises for each of the chunks (via ByteBufDataOutputStreamPlus) will be fulfilled on the event loop,
             // when a failure occurs on *this* thread, we must ensure the handleMessageResult will also be executed on the event loop.
@@ -641,18 +639,18 @@ public class OutboundMessagingConnection
         }
 
         /**
-         * Callback from {@link ByteBufDataOutputStreamPlus} when an error occurs trying to writing *within* the pipeline.
-         * Think of this method as an express mechanism to know when the pipeline fails, such that we don't need
-         * to have {@link #sendDequeuedMessage(QueuedMessage)} wait for all the futures to be created (they might never be created).
+         * Callback from {@link ByteBufDataOutputStreamPlus} when an error occurs trying to writing *within* the pipeline,
+         * but not due to the inability to send a buffer. Think of this method as an express mechanism to know when
+         * the pipeline fails, such that we don't need to have {@link #sendDequeuedMessage(QueuedMessage)} wait for
+         * all the futures to be created (they might never be created).
          *
          * Note: invoked on the netty event loop.
          */
         void handleError(Throwable t)
         {
-            // failing the promise here will eventually lead back to OMC.handleMessageResult, which closes the channel,
-            // and closes this ChannelWriter eventually, as well.
-
-            logger.info("JEB::OMC::LMD::handleError - is this thing even used!?!?!?", t);
+            logger.info("{} an error occurred while trying to send a large message", t);
+            close();
+            channel.close();
         }
 
         public void close()
@@ -665,11 +663,11 @@ public class OutboundMessagingConnection
             catch (IOException e)
             {
                 if (logger.isDebugEnabled())
-                    logger.debug("failed to close an output strezm for sending large messages, ignoring as we are closing", e);
+                    logger.debug("failed to close an output stream for sending large messages, ignoring as we are closing", e);
             }
         }
 
-        // TODO:JEB doc me
+        // TODO:JEB doc me - basically a thread safe version (given the use case here) of netty's PromiseAggregator
         private class LargeMessagePromiseAggregator
         {
             // will be fulfilled on the event loop
@@ -709,6 +707,12 @@ public class OutboundMessagingConnection
                     tryPromise();
             }
 
+            void finishFail(Throwable t)
+            {
+                doneAdding = true;
+                aggregatePromise.tryFailure(t);
+            }
+
             void finish()
             {
                 doneAdding = true;
@@ -742,7 +746,7 @@ public class OutboundMessagingConnection
         {
             // explicitly check if the backlog queue is empty as we haven't necessarily decremented the backlogSize
             // by the time this handler is invoked.
-            if (!backlog.isEmpty())  // TODO:JEB this will overschedule wrt large message thread
+            if (!backlog.isEmpty())
             {
                 // not calling dequeueMessages explicitly here (and instead scheduling the task) as we can get here directly in-line
                 // from dequeueMessages if the buffers were able to be flushed immediately to the socket. the problem we
@@ -755,13 +759,12 @@ public class OutboundMessagingConnection
 
         JVMStabilityInspector.inspectThrowable(cause);
 
-        logger.error("{} JEB::OMC Unexpected error writing", loggingTag(), cause);
-
         if (cause instanceof IOException || (cause.getCause() != null && cause.getCause() instanceof IOException))
         {
             if (shouldPurgeBacklog(channel))
                 purgeBacklog();
 
+            messageDequeuer.close();
             channel.close();
         }
         else if (future.isCancelled())
@@ -1004,13 +1007,10 @@ public class OutboundMessagingConnection
                 channel = result.channel;
                 channel.attr(PURGE_MESSAGES_CHANNEL_ATTR).set(false);
 
-                // TODO:JEB uncomment this
-//                if (logger.isTraceEnabled())
-            {
-                logger.debug("{} successfully connected, compress = {}, coalescing = {}", loggingTag(),
-                             shouldCompressConnection(connectionId.local(), connectionId.remote()),
-                             coalescingStrategy != null ? coalescingStrategy : CoalescingStrategies.Strategy.DISABLED);
-            }
+                if (logger.isTraceEnabled())
+                    logger.trace("{} successfully connected, compress = {}, coalescing = {}", loggingTag(),
+                                 shouldCompressConnection(connectionId.local(), connectionId.remote()),
+                                 coalescingStrategy != null ? coalescingStrategy : CoalescingStrategies.Strategy.DISABLED);
 
                 messageDequeuer = deriveMessageDequeuer(connectionId, channel);
                 consumerTaskThread.submit(this::maybeStartDequeuing);

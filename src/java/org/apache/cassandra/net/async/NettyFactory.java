@@ -12,14 +12,11 @@ import org.slf4j.LoggerFactory;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.AdaptiveRecvByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
-import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.ServerChannel;
 import io.netty.channel.epoll.EpollEventLoopGroup;
@@ -180,7 +177,6 @@ public final class NettyFactory
         ServerBootstrap bootstrap = new ServerBootstrap().group(acceptGroup, inboundGroup)
                                                          .channel(transport)
                                                          .option(ChannelOption.SO_BACKLOG, 500)
-//                                                         .childOption(ChannelOption.RCVBUF_ALLOCATOR, new AdaptiveRecvByteBufAllocator(1 << 8, 1 << 16, 1 << 16))
                                                          .childOption(ChannelOption.SO_KEEPALIVE, true)
                                                          .childOption(ChannelOption.TCP_NODELAY, true)
                                                          .childOption(ChannelOption.SO_REUSEADDR, true)
@@ -283,7 +279,7 @@ public final class NettyFactory
             }
 
             if (WIRETRACE)
-                pipeline.addLast("logger", new BooLooger(LogLevel.INFO));
+                pipeline.addLast("logger", new LoggingHandler(LogLevel.INFO));
 
             channel.pipeline().addLast(HANDSHAKE_HANDLER_NAME, new InboundHandshakeHandler(authenticator));
         }
@@ -368,7 +364,7 @@ public final class NettyFactory
             }
 
             if (NettyFactory.WIRETRACE)
-                pipeline.addLast("logger", new BooLooger(LogLevel.INFO));
+                pipeline.addLast("logger", new LoggingHandler(LogLevel.INFO));
 
             pipeline.addLast(HANDSHAKE_HANDLER_NAME, new OutboundHandshakeHandler(params));
         }
@@ -402,37 +398,5 @@ public final class NettyFactory
     public static EventExecutor executorForChannelGroups()
     {
         return new DefaultEventExecutor();
-    }
-
-    private static class BooLooger extends LoggingHandler
-    {
-        public BooLooger(LogLevel info)
-        {
-            super(info);
-        }
-
-        @Override
-        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-            if (logger.isEnabled(internalLevel)) {
-                logger.log(internalLevel, format(ctx, "READ") + " ::  " + msg);
-            }
-            ctx.fireChannelRead(msg);
-        }
-
-        @Override
-        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
-            if (logger.isEnabled(internalLevel)) {
-                logger.log(internalLevel, format(ctx, "WRITE") + " ::  " + msg);
-            }
-            ctx.write(msg, promise);
-        }
-        @Override
-        public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
-            if (logger.isEnabled(internalLevel)) {
-                logger.log(internalLevel, format(ctx, "WRITABILITY CHANGED :: writable = " + ctx.channel().isWritable()));
-            }
-            ctx.fireChannelWritabilityChanged();
-        }
-
     }
 }
