@@ -1209,4 +1209,10 @@ public class OutboundMessagingConnection
     {
         this.closed = closed;
     }
+
+    @VisibleForTesting
+    void setMessageDequeuer(MessageDequeuer dequeuer)
+    {
+        this.messageDequeuer = dequeuer;
+    }
 }

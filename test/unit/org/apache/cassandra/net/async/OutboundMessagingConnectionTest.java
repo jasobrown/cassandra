@@ -557,6 +557,7 @@ public class OutboundMessagingConnectionTest
     @Test
     public void handleMessageResult_IOException_ChannelNotClosed_RetryMsg()
     {
+        omc.setMessageDequeuer(omc.new SimpleMessageDequeuer());
         ChannelPromise promise = channel.newPromise();
         promise.setFailure(new IOException("this is a test"));
         Assert.assertTrue(channel.isActive());
