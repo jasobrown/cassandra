@@ -230,6 +230,9 @@ public class HandshakeProtocol
          */
         private static final int MIN_LENGTH = 9;
 
+        /**
+         * The internode messaging version of the peer; used for serializing to a version the peer understands.
+         */
         final int messagingVersion;
         final InetAddressAndPort address;
 
@@ -245,7 +248,9 @@ public class HandshakeProtocol
             int bufLength = Ints.checkedCast(Integer.BYTES + CompactEndpointSerializationHelper.instance.serializedSize(address, messagingVersion));
             ByteBuf buffer = allocator.directBuffer(bufLength, bufLength);
             buffer.writerIndex(0);
-            buffer.writeInt(messagingVersion);
+
+            // the messaging version of the local node (not #messagingVersion)
+            buffer.writeInt(MessagingService.current_version);
             try
             {
                 DataOutputPlus dop = new ByteBufDataOutputPlus(buffer);
