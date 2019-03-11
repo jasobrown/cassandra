@@ -1941,6 +1941,26 @@ public class DatabaseDescriptor
         return conf.native_transport_frame_block_size_in_kb * 1024;
     }
 
+    public static int getMaxInflightRequestsPayloadPerChannelInBytes()
+    {
+        return conf.max_inflight_requests_payload_per_channel_in_bytes;
+    }
+
+    public static void setMaxInflightRequestsPayloadPerChannelInBytes(int maxInflightRequestsPayloadPerChannelInBytes)
+    {
+        conf.max_inflight_requests_payload_per_channel_in_bytes = maxInflightRequestsPayloadPerChannelInBytes;
+    }
+
+    public static int getMaxInflightTotalRequestsPayloadInBytes()
+    {
+        return conf.max_inflight_total_requests_payload_in_bytes;
+    }
+
+    public static void setMaxInflightTotalRequestsPayloadInBytes(int maxInflightTotalRequestsPayloadInBytes)
+    {
+        conf.max_inflight_total_requests_payload_in_bytes = maxInflightTotalRequestsPayloadInBytes;
+    }
+
     public static double getCommitLogSyncGroupWindow()
     {
         return conf.commitlog_sync_group_window_in_ms;

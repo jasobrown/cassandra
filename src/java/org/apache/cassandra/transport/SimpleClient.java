@@ -124,6 +124,11 @@ public class SimpleClient implements Closeable
 
     public SimpleClient connect(boolean useCompression, boolean useChecksums) throws IOException
     {
+        return connect(useCompression, useChecksums, false);
+    }
+
+    public SimpleClient connect(boolean useCompression, boolean useChecksums, boolean isOverloadedExceptionEnabled) throws IOException
+    {
         establishConnection();
 
         Map<String, String> options = new HashMap<>();
@@ -138,6 +143,8 @@ public class SimpleClient implements Closeable
         {
             connection.setTransformer(CompressingTransformer.getTransformer(LZ4Compressor.INSTANCE));
         }
+
+        connection.setOverloadedExceptionEnabled(isOverloadedExceptionEnabled);
 
         execute(new StartupMessage(options));
         return this;

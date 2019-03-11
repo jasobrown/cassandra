@@ -30,6 +30,7 @@ public class Connection
     private final Tracker tracker;
 
     private volatile FrameBodyTransformer transformer;
+    private boolean overloadedExceptionEnabled;
 
     public Connection(Channel channel, ProtocolVersion version, Tracker tracker)
     {
@@ -50,6 +51,16 @@ public class Connection
         return transformer;
     }
 
+    public void setOverloadedExceptionEnabled(boolean overloadedExceptionEnabled)
+    {
+        this.overloadedExceptionEnabled = overloadedExceptionEnabled;
+    }
+
+    public boolean isOverloadedExceptionEnabled()
+    {
+        return overloadedExceptionEnabled;
+    }
+
     public Tracker getTracker()
     {
         return tracker;
@@ -59,6 +70,8 @@ public class Connection
     {
         return version;
     }
+
+
 
     public Channel channel()
     {

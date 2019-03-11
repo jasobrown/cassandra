@@ -31,6 +31,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
@@ -42,6 +43,8 @@ import com.google.common.collect.ImmutableSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.LocalAwareExecutorService;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tracing.Tracing;
@@ -49,6 +52,8 @@ import org.apache.cassandra.transport.messages.*;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.UUIDGen;
+
+import static org.apache.cassandra.concurrent.SharedExecutorPool.SHARED;
 
 /**
  * A message from the CQL binary protocol.
@@ -455,6 +460,25 @@ public abstract class Message
     @ChannelHandler.Sharable
     public static class Dispatcher extends SimpleChannelInboundHandler<Request>
     {
+        private static final LocalAwareExecutorService requestExecutor = SHARED.newExecutor(DatabaseDescriptor.getNativeTransportMaxThreads(),
+                                                                            Integer.MAX_VALUE,
+                                                                            "transport",
+                                                                            "Native-Transport-Requests");
+
+        private static final ConcurrentMap<Channel, AtomicLong> requestPayloadInFlightPerChannel = new ConcurrentHashMap<>();
+
+        private static final AtomicLong allRequestPayloadInFlight = new AtomicLong(0L);
+
+        public static ConcurrentMap<Channel, AtomicLong> getRequestPayloadInFlightPerChannel()
+        {
+            return requestPayloadInFlightPerChannel;
+        }
+
+        public static AtomicLong getAllRequestPayloadInFlight()
+        {
+            return allRequestPayloadInFlight;
+        }
+
         private static class FlushItem
         {
             final ChannelHandlerContext ctx;
@@ -593,42 +617,57 @@ public abstract class Message
         @Override
         public void channelRead0(ChannelHandlerContext ctx, Request request)
         {
+            // handover the request processing from eventloop to requestExecutor
+            requestExecutor.submit(() -> {
+                final Response response;
+                // TODO: was final earlier. Had to remove to access connection in "finally" block
+                ServerConnection connection = null;
+                long queryStartNanoTime = System.nanoTime();
 
-            final Response response;
-            final ServerConnection connection;
-            long queryStartNanoTime = System.nanoTime();
+                try
+                {
+                    assert request.connection() instanceof ServerConnection;
+                    connection = (ServerConnection) request.connection();
+                    if (connection.getVersion().isGreaterOrEqualTo(ProtocolVersion.V4))
+                        ClientWarn.instance.captureWarnings();
 
-            try
-            {
-                assert request.connection() instanceof ServerConnection;
-                connection = (ServerConnection)request.connection();
-                if (connection.getVersion().isGreaterOrEqualTo(ProtocolVersion.V4))
-                    ClientWarn.instance.captureWarnings();
+                    QueryState qstate = connection.validateNewMessage(request.type, connection.getVersion());
 
-                QueryState qstate = connection.validateNewMessage(request.type, connection.getVersion());
+                    logger.trace("Received: {}, v={}", request, connection.getVersion());
+                    connection.requests.inc();
+                    response = request.execute(qstate, queryStartNanoTime);
+                    response.setStreamId(request.getStreamId());
+                    response.setWarnings(ClientWarn.instance.getWarnings());
+                    response.attach(connection);
+                    connection.applyStateTransition(request.type, response.type);
+                }
+                catch (Throwable t)
+                {
+                    JVMStabilityInspector.inspectThrowable(t);
+                    UnexpectedChannelExceptionHandler handler = new UnexpectedChannelExceptionHandler(ctx.channel(), true);
+                    flush(new FlushItem(ctx, ErrorMessage.fromException(t, handler).setStreamId(request.getStreamId()), request.getSourceFrame()));
+                    return;
+                }
+                finally
+                {
+                    ClientWarn.instance.resetWarnings();
 
-                logger.trace("Received: {}, v={}", request, connection.getVersion());
-                connection.requests.inc();
-                response = request.execute(qstate, queryStartNanoTime);
-                response.setStreamId(request.getStreamId());
-                response.setWarnings(ClientWarn.instance.getWarnings());
-                response.attach(connection);
-                connection.applyStateTransition(request.type, response.type);
-            }
-            catch (Throwable t)
-            {
-                JVMStabilityInspector.inspectThrowable(t);
-                UnexpectedChannelExceptionHandler handler = new UnexpectedChannelExceptionHandler(ctx.channel(), true);
-                flush(new FlushItem(ctx, ErrorMessage.fromException(t, handler).setStreamId(request.getStreamId()), request.getSourceFrame()));
-                return;
-            }
-            finally
-            {
-                ClientWarn.instance.resetWarnings();
-            }
+                    // re-check inflight request limit, and reenable autoread to stop potential backpressure
+                    requestPayloadInFlightPerChannel.get(ctx.channel()).addAndGet(-request.getSourceFrame().bodySizeInBytes);
+                    getAllRequestPayloadInFlight().addAndGet(-request.getSourceFrame().bodySizeInBytes);
 
-            logger.trace("Responding: {}, v={}", response, connection.getVersion());
-            flush(new FlushItem(ctx, response, request.getSourceFrame()));
+                    if (connection != null
+                        && !connection.isOverloadedExceptionEnabled()
+                        && requestPayloadInFlightPerChannel.get(ctx.channel()).get() <= DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes()
+                        && getAllRequestPayloadInFlight().get() <= DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())
+                    {
+                        ctx.channel().config().setAutoRead(true);
+                    }
+                }
+
+                logger.trace("Responding: {}, v={}", response, connection.getVersion());
+                flush(new FlushItem(ctx, response, request.getSourceFrame()));
+            });
         }
 
         private void flush(FlushItem item)
@@ -645,6 +684,14 @@ public abstract class Message
 
             flusher.queued.add(item);
             flusher.start();
+        }
+
+        public static void shutdown()
+        {
+            if (requestExecutor != null)
+            {
+                requestExecutor.shutdown();
+            }
         }
     }
 
