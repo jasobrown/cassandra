@@ -21,7 +21,6 @@ package org.apache.cassandra.transport;
 import java.io.IOException;
 import java.util.EnumSet;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -33,8 +32,6 @@ import io.netty.handler.codec.MessageToMessageEncoder;
 import io.netty.util.Attribute;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.exceptions.OverloadedException;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.transport.frame.FrameBodyTransformer;
 import org.apache.cassandra.transport.messages.ErrorMessage;
 
@@ -257,49 +254,6 @@ public class Frame
                                 "Invalid message version. Got %s but previous messages on this connection had version %s",
                                 frame.header.version, connection.getVersion())),
                         frame.header.streamId);
-            }
-
-            // check for inflight request limit
-            boolean discardFrame = false;
-            Message.Dispatcher.getRequestPayloadInFlightPerChannel()
-                              .computeIfAbsent(ctx.channel(), initialValue -> new AtomicLong(0L));
-            AtomicLong currentChannelRequestPayload = Message.Dispatcher.getRequestPayloadInFlightPerChannel()
-                                                                        .get(ctx.channel());
-
-            // check channel inflight limit
-            if (currentChannelRequestPayload.addAndGet(frame.bodySizeInBytes)
-                > DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes())
-            {
-                // undo addition of new request size since the request would be discarded
-                currentChannelRequestPayload.addAndGet(-frame.bodySizeInBytes);
-                discardFrame = true;
-            }
-            // check overall inflight limit
-            else if (Message.Dispatcher.getAllRequestPayloadInFlight().addAndGet(frame.bodySizeInBytes)
-                     > DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())
-            {
-                // undo addition of new request size since the request would be discarded
-                currentChannelRequestPayload.addAndGet(-frame.bodySizeInBytes);
-                Message.Dispatcher.getAllRequestPayloadInFlight().addAndGet(-frame.bodySizeInBytes);
-                discardFrame = true;
-            }
-
-            if (discardFrame)
-            {
-                // TODO: Increment a counter to keep count of dropped requests
-                if (connection.isOverloadedExceptionEnabled())
-                {
-                    throw ErrorMessage.wrap(
-                            new OverloadedException("Server is in overloaded state. Cannot accept more requests at this point"),
-                            frame.header.streamId);
-                }
-                else
-                {
-                    // set backpressure on the channel
-                    ctx.channel().config().setAutoRead(false);
-                }
-
-                return;
             }
 
             results.add(frame);

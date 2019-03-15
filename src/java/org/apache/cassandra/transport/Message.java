@@ -45,6 +45,8 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.LocalAwareExecutorService;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.exceptions.OverloadedException;
+import org.apache.cassandra.metrics.ClientMetrics;
 import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tracing.Tracing;
@@ -617,6 +619,53 @@ public abstract class Message
         @Override
         public void channelRead0(ChannelHandlerContext ctx, Request request)
         {
+            // This check for inflight payload to potentially discard the request should have been ideally in one of the
+            // first handlers in the pipeline (Frame::decode()). However, incase of any exception thrown between that
+            // handler (where inflight payload is incremented) and this handler (Dispatcher::channelRead0) (where inflight
+            // payload in decremented), inflight payload becomes erroneous. ExceptionHandler is not sufficient for this
+            // purpose since it does not have the frame associated with the exception
+            boolean discardRequest = false;
+            requestPayloadInFlightPerChannel
+                              .computeIfAbsent(ctx.channel(), initialValue -> new AtomicLong(0L));
+            AtomicLong currentChannelRequestPayload = requestPayloadInFlightPerChannel.get(ctx.channel());
+
+            // check channel inflight limit
+            if (currentChannelRequestPayload.addAndGet(request.getSourceFrame().bodySizeInBytes)
+                > DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes())
+            {
+                // undo addition of new request size since the request would be discarded
+                currentChannelRequestPayload.addAndGet(-request.getSourceFrame().bodySizeInBytes);
+                discardRequest = true;
+            }
+            // check overall inflight limit
+            else if (Message.Dispatcher.getAllRequestPayloadInFlight().addAndGet(request.getSourceFrame().bodySizeInBytes)
+                     > DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())
+            {
+                // undo addition of new request size since the request would be discarded
+                currentChannelRequestPayload.addAndGet(-request.getSourceFrame().bodySizeInBytes);
+                Message.Dispatcher.getAllRequestPayloadInFlight().addAndGet(-request.getSourceFrame().bodySizeInBytes);
+                discardRequest = true;
+            }
+
+            if (discardRequest)
+            {
+                ClientMetrics.instance.markRequestDiscarded();
+                logger.trace("Discarded request of size: {}. InflightChannelRequestPayload: {}, InflightOverallRequestPayload: {}, Request: {}",
+                             request.getSourceFrame().bodySizeInBytes, currentChannelRequestPayload.get(), getAllRequestPayloadInFlight().get(), request);
+                if (request.connection.isOverloadedExceptionEnabled())
+                {
+                    throw ErrorMessage.wrap(
+                    new OverloadedException("Server is in overloaded state. Cannot accept more requests at this point"),
+                    request.getSourceFrame().header.streamId);
+                }
+                else
+                {
+                    // set backpressure on the channel
+                    ctx.channel().config().setAutoRead(false);
+                }
+                return;
+            }
+
             // handover the request processing from eventloop to requestExecutor
             requestExecutor.submit(() -> {
                 final Response response;
@@ -651,23 +700,40 @@ public abstract class Message
                 finally
                 {
                     ClientWarn.instance.resetWarnings();
+                    ClientMetrics.instance.markRequestProcessed();
 
                     // re-check inflight request limit, and reenable autoread to stop potential backpressure
-                    requestPayloadInFlightPerChannel.get(ctx.channel()).addAndGet(-request.getSourceFrame().bodySizeInBytes);
-                    getAllRequestPayloadInFlight().addAndGet(-request.getSourceFrame().bodySizeInBytes);
-
-                    if (connection != null
-                        && !connection.isOverloadedExceptionEnabled()
-                        && requestPayloadInFlightPerChannel.get(ctx.channel()).get() <= DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes()
-                        && getAllRequestPayloadInFlight().get() <= DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())
+                    if (ctx.channel() != null)
                     {
-                        ctx.channel().config().setAutoRead(true);
+                        requestPayloadInFlightPerChannel.get(ctx.channel()).addAndGet(-request.getSourceFrame().bodySizeInBytes);
+                        getAllRequestPayloadInFlight().addAndGet(-request.getSourceFrame().bodySizeInBytes);
+
+                        if (connection != null
+                            && !connection.isOverloadedExceptionEnabled()
+                            && requestPayloadInFlightPerChannel.get(ctx.channel()).get() <= DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes()
+                            && getAllRequestPayloadInFlight().get() <= DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())
+                        {
+                            ctx.channel().config().setAutoRead(true);
+                        }
                     }
                 }
 
                 logger.trace("Responding: {}, v={}", response, connection.getVersion());
                 flush(new FlushItem(ctx, response, request.getSourceFrame()));
             });
+        }
+
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx)
+        {
+            // remove corresponding inflight payload when a channel becomes inactive
+            if (requestPayloadInFlightPerChannel.containsKey(ctx.channel()))
+            {
+                long channelPayloadInFlight = requestPayloadInFlightPerChannel.get(ctx.channel()).get();
+                requestPayloadInFlightPerChannel.remove(ctx.channel());
+                getAllRequestPayloadInFlight().addAndGet(-channelPayloadInFlight);
+            }
+            ctx.fireChannelInactive();
         }
 
         private void flush(FlushItem item)

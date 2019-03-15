@@ -25,13 +25,12 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import org.apache.cassandra.OrderedJUnit4ClassRunner;
-import org.apache.cassandra.audit.AuditLogOptions;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.transport.messages.PrepareMessage;
+import org.apache.cassandra.exceptions.OverloadedException;
 import org.apache.cassandra.transport.messages.QueryMessage;
 
 @RunWith(OrderedJUnit4ClassRunner.class)
@@ -78,11 +77,8 @@ public class InflightRequestPayloadTrackerTest extends CQLTester
             ProtocolVersion.V5,
             KEYSPACE);
 
-            QueryMessage queryMessage = new QueryMessage("CREATE TABLE atable (pk int PRIMARY KEY, v text)",
+            QueryMessage queryMessage = new QueryMessage("CREATE TABLE atable (pk1 int PRIMARY KEY, v text)",
                                                          queryOptions);
-            client.execute(queryMessage);
-            queryMessage = new QueryMessage("SELECT * FROM atable",
-                                            queryOptions);
             client.execute(queryMessage);
         }
         finally
@@ -148,23 +144,27 @@ public class InflightRequestPayloadTrackerTest extends CQLTester
             ProtocolVersion.V5,
             KEYSPACE);
 
-            DatabaseDescriptor.setMaxInflightRequestsPayloadPerChannelInBytes(1000);
-            // set inflight request payload per channel to a value such that consequent request should exceed threshold
-            Message.Dispatcher.getRequestPayloadInFlightPerChannel().get(client.channel).addAndGet(999);
-
-            QueryMessage queryMessage = new QueryMessage("SELECT * FROM atable",
+            QueryMessage queryMessage = new QueryMessage("CREATE TABLE atable (pk int PRIMARY KEY, v text)",
                                                          queryOptions);
+            client.execute(queryMessage);
 
-            // we expect this request to be discarded
-            // TODO: Exception is not getting bubbled up. Inside client.execute() method, it gets stuck waiting for response.
-            // On the server side, ExceptionHandler is not executing the exception.
-            Message.Response response = client.execute(queryMessage);
-        }
-        catch(Exception ex)
-        {
+            // set inflight limit per channel low enough to have further request discarded
+            DatabaseDescriptor.setMaxInflightRequestsPayloadPerChannelInBytes(200);
+            queryMessage = new QueryMessage("INSERT INTO atable (pk, v) VALUES (1, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                                         queryOptions);
+            try
+            {
+                client.execute(queryMessage);
+                Assert.fail();
+            }
+            catch (RuntimeException e)
+            {
+                Assert.assertTrue(e.getCause() instanceof OverloadedException);
+            }
         }
         finally
         {
+            DatabaseDescriptor.setMaxInflightRequestsPayloadPerChannelInBytes(1000);
             client.close();
         }
     }
@@ -172,10 +172,47 @@ public class InflightRequestPayloadTrackerTest extends CQLTester
     @Test
     public void testOverloadedExceptionForOverallInflightLimit() throws Throwable
     {
-    }
+        SimpleClient client = new SimpleClient(nativeAddr.getHostAddress(),
+                                               nativePort,
+                                               ProtocolVersion.V5,
+                                               true,
+                                               new EncryptionOptions());
 
-    @Test
-    public void testOverloadedExceptionForInflightAndOverallInflightLimit() throws Throwable
-    {
+        try
+        {
+            client.connect(false, false, true);
+            QueryOptions queryOptions = QueryOptions.create(
+            QueryOptions.DEFAULT.getConsistency(),
+            QueryOptions.DEFAULT.getValues(),
+            QueryOptions.DEFAULT.skipMetadata(),
+            QueryOptions.DEFAULT.getPageSize(),
+            QueryOptions.DEFAULT.getPagingState(),
+            QueryOptions.DEFAULT.getSerialConsistency(),
+            ProtocolVersion.V5,
+            KEYSPACE);
+
+            QueryMessage queryMessage = new QueryMessage("CREATE TABLE atable (pk int PRIMARY KEY, v text)",
+                                                         queryOptions);
+            client.execute(queryMessage);
+
+            // set total inflight limit low enough to have further request discarded
+            DatabaseDescriptor.setMaxInflightTotalRequestsPayloadInBytes(600);
+            queryMessage = new QueryMessage("INSERT INTO atable (pk, v) VALUES (1, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                            queryOptions);
+            try
+            {
+                client.execute(queryMessage);
+                Assert.fail();
+            }
+            catch (RuntimeException e)
+            {
+                Assert.assertTrue(e.getCause() instanceof OverloadedException);
+            }
+        }
+        finally
+        {
+            DatabaseDescriptor.setMaxInflightTotalRequestsPayloadInBytes(1000);
+            client.close();
+        }
     }
 }

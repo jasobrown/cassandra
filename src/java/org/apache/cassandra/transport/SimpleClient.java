@@ -133,6 +133,7 @@ public class SimpleClient implements Closeable
 
         Map<String, String> options = new HashMap<>();
         options.put(StartupMessage.CQL_VERSION, "3.0.0");
+        options.put(StartupMessage.OVERLOADED_EXCEPTION_ENABLED, Boolean.toString(isOverloadedExceptionEnabled));
 
         if (useChecksums)
         {
