@@ -638,12 +638,12 @@ public abstract class Message
                 discardRequest = true;
             }
             // check overall inflight limit
-            else if (Message.Dispatcher.getAllRequestPayloadInFlight().addAndGet(request.getSourceFrame().bodySizeInBytes)
+            else if (allRequestPayloadInFlight.addAndGet(request.getSourceFrame().bodySizeInBytes)
                      > DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())
             {
                 // undo addition of new request size since the request would be discarded
                 currentChannelRequestPayload.addAndGet(-request.getSourceFrame().bodySizeInBytes);
-                Message.Dispatcher.getAllRequestPayloadInFlight().addAndGet(-request.getSourceFrame().bodySizeInBytes);
+                allRequestPayloadInFlight.addAndGet(-request.getSourceFrame().bodySizeInBytes);
                 discardRequest = true;
             }
 

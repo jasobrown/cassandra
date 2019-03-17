@@ -52,6 +52,7 @@ import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.locator.TokenMetadata;
+import org.apache.cassandra.metrics.ClientMetrics;
 import org.apache.cassandra.schema.*;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.functions.FunctionName;
@@ -404,6 +405,7 @@ public abstract class CQLTester
         SchemaLoader.startGossiper();
 
         server = new Server.Builder().withHost(nativeAddr).withPort(nativePort).build();
+        ClientMetrics.instance.init(Collections.singleton(server));
         server.start();
 
         for (ProtocolVersion version : PROTOCOL_VERSIONS)

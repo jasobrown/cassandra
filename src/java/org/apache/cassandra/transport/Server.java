@@ -369,6 +369,8 @@ public class Server implements CassandraDaemon.Server
             pipeline.addLast("messageDecoder", messageDecoder);
             pipeline.addLast("messageEncoder", messageEncoder);
 
+            pipeline.addLast("executor", dispatcher);
+
             // The exceptionHandler will take care of handling exceptionCaught(...) events while still running
             // on the same EventLoop as all previous added handlers in the pipeline. This is important as the used
             // eventExecutorGroup may not enforce strict ordering for channel events.
@@ -376,8 +378,6 @@ public class Server implements CassandraDaemon.Server
             // correctly handled before the handler itself is removed.
             // See https://issues.apache.org/jira/browse/CASSANDRA-13649
             pipeline.addLast("exceptionHandler", exceptionHandler);
-
-            pipeline.addLast("executor", dispatcher);
         }
     }
 
