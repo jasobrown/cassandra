@@ -41,7 +41,6 @@ public class Frame
 
     public final Header header;
     public final ByteBuf body;
-    public final long bodySizeInBytes;
 
     /**
      * An on-wire frame consists of a header and a body.
@@ -59,7 +58,6 @@ public class Frame
     {
         this.header = header;
         this.body = body;
-        this.bodySizeInBytes = body.readableBytes();
     }
 
     public void retain()
@@ -74,7 +72,7 @@ public class Frame
 
     public static Frame create(Message.Type type, int streamId, ProtocolVersion version, EnumSet<Header.Flag> flags, ByteBuf body)
     {
-        Header header = new Header(version, flags, streamId, type);
+        Header header = new Header(version, flags, streamId, type, body.readableBytes());
         return new Frame(header, body);
     }
 
@@ -89,13 +87,15 @@ public class Frame
         public final EnumSet<Flag> flags;
         public final int streamId;
         public final Message.Type type;
+        public final long bodySizeInBytes;
 
-        private Header(ProtocolVersion version, EnumSet<Flag> flags, int streamId, Message.Type type)
+        private Header(ProtocolVersion version, EnumSet<Flag> flags, int streamId, Message.Type type, long bodySizeInBytes)
         {
             this.version = version;
             this.flags = flags;
             this.streamId = streamId;
             this.type = type;
+            this.bodySizeInBytes = bodySizeInBytes;
         }
 
         public enum Flag
@@ -229,7 +229,7 @@ public class Frame
             idx += bodyLength;
             buffer.readerIndex(idx);
 
-            return new Frame(new Header(version, decodedFlags, streamId, type), body);
+            return new Frame(new Header(version, decodedFlags, streamId, type, bodyLength), body);
         }
 
         @Override
