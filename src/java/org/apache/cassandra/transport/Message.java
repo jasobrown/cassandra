@@ -630,20 +630,20 @@ public abstract class Message
             AtomicLong currentChannelRequestPayload = requestPayloadInFlightPerChannel.get(ctx.channel());
 
             // check channel inflight limit
-            if (currentChannelRequestPayload.addAndGet(request.getSourceFrame().bodySizeInBytes)
+            if (currentChannelRequestPayload.addAndGet(request.getSourceFrame().header.bodySizeInBytes)
                 > DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes())
             {
                 // undo addition of new request size since the request would be discarded
-                currentChannelRequestPayload.addAndGet(-request.getSourceFrame().bodySizeInBytes);
+                currentChannelRequestPayload.addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
                 discardRequest = true;
             }
             // check overall inflight limit
-            else if (allRequestPayloadInFlight.addAndGet(request.getSourceFrame().bodySizeInBytes)
+            else if (allRequestPayloadInFlight.addAndGet(request.getSourceFrame().header.bodySizeInBytes)
                      > DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())
             {
                 // undo addition of new request size since the request would be discarded
-                currentChannelRequestPayload.addAndGet(-request.getSourceFrame().bodySizeInBytes);
-                allRequestPayloadInFlight.addAndGet(-request.getSourceFrame().bodySizeInBytes);
+                currentChannelRequestPayload.addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
+                allRequestPayloadInFlight.addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
                 discardRequest = true;
             }
 
@@ -651,7 +651,7 @@ public abstract class Message
             {
                 ClientMetrics.instance.markRequestDiscarded();
                 logger.trace("Discarded request of size: {}. InflightChannelRequestPayload: {}, InflightOverallRequestPayload: {}, Request: {}",
-                             request.getSourceFrame().bodySizeInBytes, currentChannelRequestPayload.get(), getAllRequestPayloadInFlight().get(), request);
+                             request.getSourceFrame().header.bodySizeInBytes, currentChannelRequestPayload.get(), getAllRequestPayloadInFlight().get(), request);
                 if (request.connection.isOverloadedExceptionEnabled())
                 {
                     throw ErrorMessage.wrap(
@@ -705,8 +705,8 @@ public abstract class Message
                     // re-check inflight request limit, and reenable autoread to stop potential backpressure
                     if (ctx.channel() != null)
                     {
-                        requestPayloadInFlightPerChannel.get(ctx.channel()).addAndGet(-request.getSourceFrame().bodySizeInBytes);
-                        getAllRequestPayloadInFlight().addAndGet(-request.getSourceFrame().bodySizeInBytes);
+                        requestPayloadInFlightPerChannel.get(ctx.channel()).addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
+                        getAllRequestPayloadInFlight().addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
 
                         if (connection != null
                             && !connection.isOverloadedExceptionEnabled()
