@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.transport;
 
-import java.util.ArrayList;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.EnumSet;
@@ -459,7 +458,6 @@ public abstract class Message
         }
     }
 
-    @ChannelHandler.Sharable
     public static class Dispatcher extends SimpleChannelInboundHandler<Request>
     {
         private static final LocalAwareExecutorService requestExecutor = SHARED.newExecutor(DatabaseDescriptor.getNativeTransportMaxThreads(),
@@ -467,14 +465,14 @@ public abstract class Message
                                                                             "transport",
                                                                             "Native-Transport-Requests");
 
-        private static final ConcurrentMap<Channel, AtomicLong> requestPayloadInFlightPerChannel = new ConcurrentHashMap<>();
-
         private static final AtomicLong allRequestPayloadInFlight = new AtomicLong(0L);
 
-        public static ConcurrentMap<Channel, AtomicLong> getRequestPayloadInFlightPerChannel()
-        {
-            return requestPayloadInFlightPerChannel;
-        }
+        /**
+         * Current count of *request* bytes that are live on the channel.
+         *
+         * NOTE: this field should only be accessed on the netty event loop.
+         */
+        private long channelPayloadBytesInFlight;
 
         public static AtomicLong getAllRequestPayloadInFlight()
         {
@@ -486,21 +484,23 @@ public abstract class Message
             final ChannelHandlerContext ctx;
             final Object response;
             final Frame sourceFrame;
-            private FlushItem(ChannelHandlerContext ctx, Object response, Frame sourceFrame)
+            final ServerConnection connection;
+
+            private FlushItem(ChannelHandlerContext ctx, Object response, Frame sourceFrame, ServerConnection connection)
             {
                 this.ctx = ctx;
                 this.sourceFrame = sourceFrame;
                 this.response = response;
+                this.connection = connection;
             }
         }
 
-        private static abstract class Flusher implements Runnable
+        private abstract class Flusher implements Runnable
         {
             final EventLoop eventLoop;
             final ConcurrentLinkedQueue<FlushItem> queued = new ConcurrentLinkedQueue<>();
             final AtomicBoolean scheduled = new AtomicBoolean(false);
             final HashSet<ChannelHandlerContext> channels = new HashSet<>();
-            final List<FlushItem> flushed = new ArrayList<>();
 
             void start()
             {
@@ -516,10 +516,11 @@ public abstract class Message
             }
         }
 
-        private static final class LegacyFlusher extends Flusher
+        private final class LegacyFlusher extends Flusher
         {
             int runsSinceFlush = 0;
             int runsWithNoWork = 0;
+            int countSinceLastFlush = 0;
 
             private LegacyFlusher(EventLoop eventLoop)
             {
@@ -528,29 +529,27 @@ public abstract class Message
 
             public void run()
             {
-
                 boolean doneWork = false;
-                FlushItem flush;
-                while ( null != (flush = queued.poll()) )
+                while (true)
                 {
+                    FlushItem flush = queued.poll();
+                    if (flush == null)
+                        break;
                     channels.add(flush.ctx);
-                    flush.ctx.write(flush.response, flush.ctx.voidPromise());
-                    flushed.add(flush);
+                    flush.ctx.write(flush.response, flush.ctx.voidPromise()).addListener(future -> releaseCrap(flush));
                     doneWork = true;
+                    countSinceLastFlush++;
                 }
 
                 runsSinceFlush++;
 
-                if (!doneWork || runsSinceFlush > 2 || flushed.size() > 50)
+                if (!doneWork || runsSinceFlush > 2 || countSinceLastFlush > 50)
                 {
                     for (ChannelHandlerContext channel : channels)
                         channel.flush();
-                    for (FlushItem item : flushed)
-                        item.sourceFrame.release();
-
                     channels.clear();
-                    flushed.clear();
                     runsSinceFlush = 0;
+                    countSinceLastFlush = 0;
                 }
 
                 if (doneWork)
@@ -572,7 +571,7 @@ public abstract class Message
             }
         }
 
-        private static final class ImmediateFlusher extends Flusher
+        private final class ImmediateFlusher extends Flusher
         {
             private ImmediateFlusher(EventLoop eventLoop)
             {
@@ -582,14 +581,15 @@ public abstract class Message
             public void run()
             {
                 boolean doneWork = false;
-                FlushItem flush;
                 scheduled.set(false);
 
-                while (null != (flush = queued.poll()))
+                while (true)
                 {
+                    FlushItem flush = queued.poll();
+                    if (flush == null)
+                        break;
                     channels.add(flush.ctx);
-                    flush.ctx.write(flush.response, flush.ctx.voidPromise());
-                    flushed.add(flush);
+                    flush.ctx.write(flush.response, flush.ctx.voidPromise()).addListener(future -> releaseCrap(flush));
                     doneWork = true;
                 }
 
@@ -597,11 +597,7 @@ public abstract class Message
                 {
                     for (ChannelHandlerContext channel : channels)
                         channel.flush();
-                    for (FlushItem item : flushed)
-                        item.sourceFrame.release();
-
                     channels.clear();
-                    flushed.clear();
                 }
             }
         }
@@ -625,16 +621,11 @@ public abstract class Message
             // payload in decremented), inflight payload becomes erroneous. ExceptionHandler is not sufficient for this
             // purpose since it does not have the frame associated with the exception
             boolean discardRequest = false;
-            requestPayloadInFlightPerChannel
-                              .computeIfAbsent(ctx.channel(), initialValue -> new AtomicLong(0L));
-            AtomicLong currentChannelRequestPayload = requestPayloadInFlightPerChannel.get(ctx.channel());
 
             // check channel inflight limit
-            if (currentChannelRequestPayload.addAndGet(request.getSourceFrame().header.bodySizeInBytes)
-                > DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes())
+            long nextVal = channelPayloadBytesInFlight + request.getSourceFrame().header.bodySizeInBytes;
+            if (nextVal > DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes())
             {
-                // undo addition of new request size since the request would be discarded
-                currentChannelRequestPayload.addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
                 discardRequest = true;
             }
             // check overall inflight limit
@@ -642,7 +633,6 @@ public abstract class Message
                      > DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())
             {
                 // undo addition of new request size since the request would be discarded
-                currentChannelRequestPayload.addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
                 allRequestPayloadInFlight.addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
                 discardRequest = true;
             }
@@ -651,7 +641,7 @@ public abstract class Message
             {
                 ClientMetrics.instance.markRequestDiscarded();
                 logger.trace("Discarded request of size: {}. InflightChannelRequestPayload: {}, InflightOverallRequestPayload: {}, Request: {}",
-                             request.getSourceFrame().header.bodySizeInBytes, currentChannelRequestPayload.get(), getAllRequestPayloadInFlight().get(), request);
+                             request.getSourceFrame().header.bodySizeInBytes, channelPayloadBytesInFlight, getAllRequestPayloadInFlight().get(), request);
                 if (request.connection.isOverloadedExceptionEnabled())
                 {
                     throw ErrorMessage.wrap(
@@ -666,72 +656,90 @@ public abstract class Message
                 return;
             }
 
+            channelPayloadBytesInFlight = nextVal;
+
             // handover the request processing from eventloop to requestExecutor
-            requestExecutor.submit(() -> {
-                final Response response;
-                // TODO: was final earlier. Had to remove to access connection in "finally" block
-                ServerConnection connection = null;
-                long queryStartNanoTime = System.nanoTime();
+            requestExecutor.submit(() -> aaa(ctx, request));
+        }
 
-                try
+        /**
+         * Note: this should only execute on the netty event loop for the channel the message was sent on
+         */
+        private void releaseCrap(FlushItem item)
+        {
+            // TODO:JEB i'm not sure if this is too late or if we should decrement release/decrement earlier....
+            // we want to decrement on the event loop for sure, but it's arguable we should release the memory earlier
+            item.sourceFrame.release();
+
+            // TODO:JEB was this if condition really needed? we should decrement the global count no matter what
+//            if (item.ctx.channel() != null)
+            {
+                channelPayloadBytesInFlight -= -item.sourceFrame.header.bodySizeInBytes;
+                getAllRequestPayloadInFlight().addAndGet(-item.sourceFrame.header.bodySizeInBytes);
+
+                // now check to see if we need to reenable the channel's autoRead
+                ChannelConfig config = item.ctx.channel().config();
+                if (!config.isAutoRead()
+                    && item.connection != null
+                    && !item.connection.isOverloadedExceptionEnabled()
+                    && (channelPayloadBytesInFlight == 0 ||
+                        (channelPayloadBytesInFlight <= DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes()
+                        && getAllRequestPayloadInFlight().get() <= DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())))
                 {
-                    assert request.connection() instanceof ServerConnection;
-                    connection = (ServerConnection) request.connection();
-                    if (connection.getVersion().isGreaterOrEqualTo(ProtocolVersion.V4))
-                        ClientWarn.instance.captureWarnings();
-
-                    QueryState qstate = connection.validateNewMessage(request.type, connection.getVersion());
-
-                    logger.trace("Received: {}, v={}", request, connection.getVersion());
-                    connection.requests.inc();
-                    response = request.execute(qstate, queryStartNanoTime);
-                    response.setStreamId(request.getStreamId());
-                    response.setWarnings(ClientWarn.instance.getWarnings());
-                    response.attach(connection);
-                    connection.applyStateTransition(request.type, response.type);
+                    config.setAutoRead(true);
                 }
-                catch (Throwable t)
-                {
-                    JVMStabilityInspector.inspectThrowable(t);
-                    UnexpectedChannelExceptionHandler handler = new UnexpectedChannelExceptionHandler(ctx.channel(), true);
-                    flush(new FlushItem(ctx, ErrorMessage.fromException(t, handler).setStreamId(request.getStreamId()), request.getSourceFrame()));
-                    return;
-                }
-                finally
-                {
-                    ClientWarn.instance.resetWarnings();
-                    ClientMetrics.instance.markRequestProcessed();
+            }
+        }
 
-                    // re-check inflight request limit, and reenable autoread to stop potential backpressure
-                    if (ctx.channel() != null)
-                    {
-                        requestPayloadInFlightPerChannel.get(ctx.channel()).addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
-                        getAllRequestPayloadInFlight().addAndGet(-request.getSourceFrame().header.bodySizeInBytes);
+        // TODO:JEB I kind of like this functionality moved to it's own disctinct/method so that we can make it clear
+        // that the functionality *will not* execute on the netty event loop
+        void aaa(ChannelHandlerContext ctx, Request request)
+        {
+            final Response response;
+            ServerConnection connection = null;
+            long queryStartNanoTime = System.nanoTime();
 
-                        if (connection != null
-                            && !connection.isOverloadedExceptionEnabled()
-                            && requestPayloadInFlightPerChannel.get(ctx.channel()).get() <= DatabaseDescriptor.getMaxInflightRequestsPayloadPerChannelInBytes()
-                            && getAllRequestPayloadInFlight().get() <= DatabaseDescriptor.getMaxInflightTotalRequestsPayloadInBytes())
-                        {
-                            ctx.channel().config().setAutoRead(true);
-                        }
-                    }
-                }
+            try
+            {
+                assert request.connection() instanceof ServerConnection;
+                connection = (ServerConnection) request.connection();
+                if (connection.getVersion().isGreaterOrEqualTo(ProtocolVersion.V4))
+                    ClientWarn.instance.captureWarnings();
 
-                logger.trace("Responding: {}, v={}", response, connection.getVersion());
-                flush(new FlushItem(ctx, response, request.getSourceFrame()));
-            });
+                QueryState qstate = connection.validateNewMessage(request.type, connection.getVersion());
+
+                logger.trace("Received: {}, v={}", request, connection.getVersion());
+                connection.requests.inc();
+                response = request.execute(qstate, queryStartNanoTime);
+                response.setStreamId(request.getStreamId());
+                response.setWarnings(ClientWarn.instance.getWarnings());
+                response.attach(connection);
+                connection.applyStateTransition(request.type, response.type);
+            }
+            catch (Throwable t)
+            {
+                JVMStabilityInspector.inspectThrowable(t);
+                UnexpectedChannelExceptionHandler handler = new UnexpectedChannelExceptionHandler(ctx.channel(), true);
+                flush(new FlushItem(ctx, ErrorMessage.fromException(t, handler).setStreamId(request.getStreamId()), request.getSourceFrame(), connection));
+                return;
+            }
+            finally
+            {
+                ClientWarn.instance.resetWarnings();
+                ClientMetrics.instance.markRequestProcessed();
+            }
+
+            logger.trace("Responding: {}, v={}", response, connection.getVersion());
+            flush(new FlushItem(ctx, response, request.getSourceFrame(), connection));
         }
 
         @Override
         public void channelInactive(ChannelHandlerContext ctx)
         {
             // remove corresponding inflight payload when a channel becomes inactive
-            if (requestPayloadInFlightPerChannel.containsKey(ctx.channel()))
+            if (channelPayloadBytesInFlight > 0)
             {
-                long channelPayloadInFlight = requestPayloadInFlightPerChannel.get(ctx.channel()).get();
-                requestPayloadInFlightPerChannel.remove(ctx.channel());
-                getAllRequestPayloadInFlight().addAndGet(-channelPayloadInFlight);
+                allRequestPayloadInFlight.addAndGet(-channelPayloadBytesInFlight);
             }
             ctx.fireChannelInactive();
         }
