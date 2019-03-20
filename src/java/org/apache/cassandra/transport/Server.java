@@ -336,7 +336,6 @@ public class Server implements CassandraDaemon.Server
         private static final Frame.OutboundBodyTransformer outboundFrameTransformer = new Frame.OutboundBodyTransformer();
         private static final Frame.Encoder frameEncoder = new Frame.Encoder();
         private static final Message.ExceptionHandler exceptionHandler = new Message.ExceptionHandler();
-        private static final Message.Dispatcher dispatcher = new Message.Dispatcher(DatabaseDescriptor.useNativeTransportLegacyFlusher());
         private static final ConnectionLimitHandler connectionLimitHandler = new ConnectionLimitHandler();
 
         private final Server server;
@@ -369,7 +368,7 @@ public class Server implements CassandraDaemon.Server
             pipeline.addLast("messageDecoder", messageDecoder);
             pipeline.addLast("messageEncoder", messageEncoder);
 
-            pipeline.addLast("executor", dispatcher);
+            pipeline.addLast("executor", new Message.Dispatcher(DatabaseDescriptor.useNativeTransportLegacyFlusher()));
 
             // The exceptionHandler will take care of handling exceptionCaught(...) events while still running
             // on the same EventLoop as all previous added handlers in the pipeline. This is important as the used
